@@ -30,3 +30,13 @@ dialog{width:min(640px,92vw);max-height:85vh;overflow:auto;border:1px solid #dce
 .download-ready-actions a{font-weight:600;color:var(--blue);padding:.45rem .7rem;border:1px solid #b7c8f1;border-radius:6px;text-decoration:none;background:#f3f7ff}
 .download-ready-actions a:hover{background:#e8f0ff}
 .download-ready-actions button{padding:.45rem .7rem;font-size:.8rem}
+
+.export-choice{border:1px solid var(--line);border-radius:9px;padding:8px 12px 12px;margin:14px 0;display:grid;gap:8px;min-width:0}
+.export-choice legend{font-size:.8rem;font-weight:700;color:#586a85;padding:0 5px}
+.export-choice label{display:flex;flex-direction:row;gap:9px;align-items:flex-start;margin:0;padding:10px 11px;border:1px solid #dbe3ef;border-radius:7px;cursor:pointer;font-size:.875rem;line-height:1.4}
+.export-choice label:has(input:checked){border-color:var(--blue);background:#f2f6ff}
+.export-choice input[type=radio]{width:auto;flex:0 0 auto;margin:3px 0 0}
+.export-choice label>span{display:flex;flex-direction:column;gap:3px;min-width:0}
+.export-choice .small{font-size:.75rem;color:#7a879b;line-height:1.5}
+#export-password-fields label{margin:12px 0}
+#export-feedback{white-space:pre-wrap}

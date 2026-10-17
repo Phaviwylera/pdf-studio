@@ -1,6 +1,6 @@
 # PDF Studio
 
-Browser-local PDF text editing with continuous scrolling, native-text export, password-protected PDF decryption in WebAssembly, source metadata inspection and optional replacement, standalone AES-256 PDF encryption with optional JSON-based native metadata replacement, fixed-decimal alignment, per-text X/Y position locks, SHA-256/SHA-512 fingerprints, and authorized RSA PFX/P12 signing.
+Browser-local PDF text editing with continuous scrolling, native-text export with an optional AES-256 password-protected copy, password-protected PDF decryption in WebAssembly, source metadata inspection and optional replacement, standalone AES-256 PDF encryption with optional JSON-based native metadata replacement, fixed-decimal alignment, per-text X/Y position locks, SHA-256/SHA-512 fingerprints, and authorized RSA PFX/P12 signing.
 
 Live app: https://pdf-studio.phavithiranofficial.chatgpt.site
 
@@ -21,6 +21,14 @@ Open http://127.0.0.1:8765/. Do not open index.html directly: JavaScript modules
 Click text to type in place. Enter commits; Shift+Enter inserts a line; Escape cancels. Drag the move handle or use arrow keys. Alignment, Apply changes, exact coordinates, Lock X anchor, and Lock Y baseline are together in the sticky inspector header. Position locks are per text block, last for the current open document session, and are not embedded as PDF permissions.
 
 No-change downloads preserve the original bytes unless a metadata replacement JSON is selected. Native exports preserve selectable edited text and existing artwork where the source structure supports safe replacement. Font matching and replacement are not universal; review exported documents.
+
+### Export options
+
+**Export PDF** on an editable document opens an export choice. **Regular export** downloads the normal native PDF. **AES-256 password-protected export** first creates that same native export — including applied edits and any loaded metadata replacement — and then passes exactly those bytes to the existing `encryptPdfCopy` function. The protected result downloads with `-encrypted.pdf` in its name (for example `statement-edited-encrypted.pdf`).
+
+Encryption asks for an open password and a matching confirmation, each at least 8 characters, plus an optional owner password (at least 8 characters and different from the open password; blank uses the open password). Everything runs in this browser: passwords are not uploaded, logged or persisted, are used only for that export, and the password fields are cleared after the attempt and whenever the dialog closes. Lost passwords cannot be recovered.
+
+Signed and view-only documents bypass the export choice: **Export PDF** (shown as **Download original**) downloads the exact uploaded bytes unchanged. **Hash original** also keeps fingerprinting the exact uploaded bytes, even when a password-protected document has been unlocked into an editable working copy. The standalone **Encrypt PDF** action remains independent of the open document and of this export choice.
 
 ### Original fonts
 
@@ -53,11 +61,11 @@ Optionally choose a UTF-8 `.json` metadata file (up to 8 MB) to **replace the PD
 
 Downloads use a blob link appended to the page. After any download the app shows a **Download ready** panel with the filename, size, a **Save again** link, an **Open file** link, and — inside an embedded preview — **Open app in new tab**. Embedded preview frames can block automatic downloads even when the file was created successfully; use that panel or open the app in its own tab and retry there.
 
-Run metadata, export, and encryption regression tests with `node --test tests/*.test.mjs` (Node.js required only for tests).
+Run metadata, export-choice, encryption, decryption, and fingerprint regression tests with `node --test tests/*.test.mjs` (Node.js required only for tests). Syntax-check the runtime and test modules with `node --check dist/*.mjs` and `node --check tests/*.mjs` before running the suite.
 
 ## Protection and signing
 
-In the editor, signed and uninspectable PDFs remain view-only. A password-protected PDF is decrypted only after its password is accepted, using qpdf/WASM in the browser; the unlocked working copy can then be edited and exported. The exact uploaded bytes remain available unchanged: locked/signed downloads and **Hash original** use those bytes. Wrong or cancelled passwords, or a PDF that qpdf cannot safely decrypt, do not unlock editing and show a clear view-only message. The standalone Encrypt PDF action accepts only unencrypted, unsigned sources. Existing signatures are detected structurally, not validated cryptographically by the viewer.
+In the editor, signed and uninspectable PDFs remain view-only. A password-protected PDF is decrypted only after its password is accepted, using qpdf/WASM in the browser; the unlocked working copy can then be edited and exported (including as a newly AES-256 encrypted copy). The exact uploaded bytes remain available unchanged: locked/signed downloads and **Hash original** use those bytes. Wrong or cancelled passwords, or a PDF that qpdf cannot safely decrypt, do not unlock editing and show a clear view-only message. Signed PDFs stay protected even if a password is known. The standalone Encrypt PDF action accepts only unencrypted, unsigned sources. Existing signatures are detected structurally, not validated cryptographically by the viewer.
 
 New signed copies use an authorized user-provided RSA 2048+ PFX/P12 certificate and include a signing record page. Certificates/passwords are processed in browser memory, not uploaded. Expiry, key matching, and declared key usage are checked. Certificate trust, revocation, and trusted timestamps are not checked. This does not restore an issuer signature after changes. SHA-256/SHA-512 identify exact file bytes, not issuer identity.
 
@@ -66,6 +74,7 @@ New signed copies use an authorized user-provided RSA 2048+ PFX/P12 certificate 
 - `dist/app.mjs`: UI, editing, page rendering and export orchestration.
 - `dist/native-export.mjs`: native PDF text replacement and signature protection.
 - `dist/encrypt.mjs`: standalone AES-256 PDF encryption with optional JSON-based native Info/XMP replacement.
+- `dist/export-encryption.mjs`: editor export password rules, encrypted download naming, and the native-export-to-`encryptPdfCopy` handoff.
 - `dist/decrypt.mjs`: browser-only decryption of password-protected PDFs with bundled qpdf/WASM.
 - `dist/vendor/qpdf/`: qpdf 11.0.0 WebAssembly runtime and Apache-2.0 license.
 - `dist/positioning.mjs`: axis-lock helpers.
