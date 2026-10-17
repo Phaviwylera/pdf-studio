@@ -30,6 +30,21 @@ Encryption asks for an open password and a matching confirmation, each at least 
 
 Signed and view-only documents bypass the export choice: **Export PDF** (shown as **Download original**) downloads the exact uploaded bytes unchanged. **Hash original** also keeps fingerprinting the exact uploaded bytes, even when a password-protected document has been unlocked into an editable working copy. The standalone **Encrypt PDF** action remains independent of the open document and of this export choice.
 
+### Typography consistency
+
+The preview, the in-place editor and native export share one typography model, so an edit never picks up a fraction of a point or a different rendering style between stages:
+
+- Font size, X/Y baseline, letter spacing, word spacing, stroke weight and line height are PDF points, normalized to 0.001 pt. The controls show the normalized value that is actually used.
+- Text advances are PDF glyph advances. Browser kerning and ligatures are deliberately disabled in the preview and the editing box because the PDF export writes glyph-by-glyph advances; enabling them in only one stage would change widths and positions.
+- Letter spacing is PDF `Tc`, word spacing is `Tw`, and both are applied to the same glyphs in the preview and the exported content stream.
+- The source text rendering mode (`Tr`) is preserved: fill, stroke, or fill + stroke. Stroke color and line width (`w`) are captured and re-exported, and stroke-only text is not silently filled.
+- Text rise (`Ts`) is folded into the captured baseline, so superscripts and raised labels keep their baseline instead of jumping to the unraised line.
+- Multi-line line height is the same multiplier in both stages. The in-place editor and its selection overlay place the first baseline from the actual font metrics of the same CSS line box, not from a fixed fraction of the font size.
+- Original horizontal scaling is captured once as a horizontal text scale. Stroke weight is compensated for that scale in the preview so it matches the exported `w` value in page points.
+- The text color control is the fill color. For stroke-only text it shows and edits the stroke color instead, so the visible color never sits in a hidden channel; fill + stroke text keeps its separately captured stroke color. Underlines follow the visible paint channel.
+
+If a text block mixes paint modes, stroke weights, colors, spacing or text rise between its text-show operators, it is treated as inspection-only rather than exporting a guessed style. Complex-script shaping is outside this model.
+
 ### Original fonts
 
 When a PDF embeds a font program, the editor registers that program for the document and uses it for the live preview, the in-place text box, and export, so typed capitals, digits and other characters render in the PDF's own typeface instead of the browser fallback. Coverage is checked against the whole embedded font, not only the glyphs observed on the page you are editing: a character that appears in a heading on page 3 is available when editing page 1 of the same document.
@@ -61,7 +76,7 @@ Optionally choose a UTF-8 `.json` metadata file (up to 8 MB) to **replace the PD
 
 Downloads use a blob link appended to the page. After any download the app shows a **Download ready** panel with the filename, size, a **Save again** link, an **Open file** link, and — inside an embedded preview — **Open app in new tab**. Embedded preview frames can block automatic downloads even when the file was created successfully; use that panel or open the app in its own tab and retry there.
 
-Run metadata, export-choice, encryption, decryption, and fingerprint regression tests with `node --test tests/*.test.mjs` (Node.js required only for tests). Syntax-check the runtime and test modules with `node --check dist/*.mjs` and `node --check tests/*.mjs` before running the suite.
+Run metadata, typography, export-choice, encryption, decryption, and fingerprint regression tests with `node --test tests/*.test.mjs` (Node.js required only for tests). Typography tests cover 0.001 pt normalization, glyph-advance layout without kerning, word/letter spacing, paint modes, stroke weight and baseline placement. Syntax-check the runtime and test modules with `node --check dist/*.mjs` and `node --check tests/*.mjs` before running the suite.
 
 ## Protection and signing
 
@@ -77,6 +92,7 @@ New signed copies use an authorized user-provided RSA 2048+ PFX/P12 certificate 
 - `dist/export-encryption.mjs`: editor export password rules, encrypted download naming, and the native-export-to-`encryptPdfCopy` handoff.
 - `dist/decrypt.mjs`: browser-only decryption of password-protected PDFs with bundled qpdf/WASM.
 - `dist/vendor/qpdf/`: qpdf 11.0.0 WebAssembly runtime and Apache-2.0 license.
+- `dist/typography.mjs`: the shared typography model (0.001 pt measures, glyph advances, spacing, paint modes, stroke weight and baseline placement).
 - `dist/positioning.mjs`: axis-lock helpers.
 - `dist/metadata.mjs`: source metadata report, Info/XMP replacement or preservation, and optional provenance attachment.
 - `dist/font-identity.mjs`: Arial/Helvetica family, style and subset-name recognition.
