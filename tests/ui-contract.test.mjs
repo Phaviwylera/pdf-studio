@@ -54,4 +54,12 @@ test('downloads expose a manual retry outside blocked preview frames', async () 
  assert.match(app, /10\*60\*1000/);
  assert.match(app, /window\.self!==window\.top/);
  assert.match(app, /window\.open\(location\.href,'_blank','noopener'\)/);
+ assert.match(app, /import \{ decryptPdfCopy \} from '\.\/decrypt\.mjs'/);
+ assert.match(app, /workingBytes=await decryptPdfCopy\(\{bytes,password:acceptedPassword\?\?''\}\)/);
+ assert.match(app, /original=workingBytes;uploadedOriginal=bytes/);
+ assert.match(app, /new Blob\(\[uploadedOriginal\.slice\(\)\]/);
+ assert.match(app, /\):uploadedOriginal\.slice\(\);/);
+ const decrypt = await read('../dist/decrypt.mjs');
+ assert.match(decrypt, /--decrypt/);
+ assert.match(decrypt, /new URL\('\.\/vendor\/qpdf\/qpdf\.wasm', import\.meta\.url\)/);
 });
