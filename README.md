@@ -22,6 +22,12 @@ Click text to type in place. Enter commits; Shift+Enter inserts a line; Escape c
 
 No-change downloads preserve the original bytes unless a metadata replacement JSON is selected. Native exports preserve selectable edited text and existing artwork where the source structure supports safe replacement. Font matching and replacement are not universal; review exported documents.
 
+### Original fonts
+
+When a PDF embeds a font program, the editor registers that program for the document and uses it for the live preview, the in-place text box, and export, so typed capitals, digits and other characters render in the PDF's own typeface instead of the browser fallback. Coverage is checked against the whole embedded font, not only the glyphs observed on the page you are editing: a character that appears in a heading on page 3 is available when editing page 1 of the same document.
+
+Most PDF producers embed only a **subset** of the font — the glyphs actually used somewhere in that document. Characters that are absent from the subset cannot be drawn with the original font; the editor then names the missing characters and uses a substitute for the edit (or a loaded TTF/OTF) rather than exporting blank glyphs. To recover those characters, load the full TTF/OTF in **Available font → Load font file** and choose **Best font match**. Standard PDF fonts without an embedded program (Helvetica, Times, Courier) use the bundled standard-font program that PDF.js loads (Liberation in this build) for typed text, with family substitutes only when a character is absent.
+
 ## Source metadata
 
 After opening a PDF, click **Metadata** to inspect and download a JSON record of its native PDF Info fields (including custom fields) and XMP XML, when available. Calculated PDF.js document properties are not shown as Info metadata. Without a replacement upload, an edited native export preserves the source PDF's Info dictionary and XMP stream and embeds `pdf-studio-source-metadata.json` as a provenance attachment. An unchanged download remains byte-for-byte original.
@@ -63,6 +69,7 @@ New signed copies use an authorized user-provided RSA 2048+ PFX/P12 certificate 
 - `dist/positioning.mjs`: axis-lock helpers.
 - `dist/metadata.mjs`: source metadata report, Info/XMP replacement or preservation, and optional provenance attachment.
 - `dist/font-identity.mjs`: Arial/Helvetica family, style and subset-name recognition.
+- `dist/font-coverage.mjs`: embedded-font character coverage, missing-glyph reporting and mixed font-run selection for canvas previews.
 - `dist/signing.mjs`: PFX/P12 handling, signed-copy creation and fingerprints.
 - `dist/vendor/`: bundled PDF.js, pdf-lib, fontkit, Forge and supporting assets, plus `pdf-encrypt/` (@pdfsmaller/pdf-encrypt 1.2.0, MIT) for AES-256 PDF security.
 
