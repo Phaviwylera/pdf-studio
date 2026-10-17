@@ -17,6 +17,55 @@ const plainObject = value => value !== null && typeof value === 'object' && !Arr
 // Only PDF Info and raw XMP can be replaced. Document properties such as page count,
 // encryption and signatures are not metadata and cannot be recreated from a JSON file.
 export function parseUploadedMetadata(data, filename) {
+ try {
+  return parseUploadedMetadataStrict(data, filename);
+ } catch (error) {
+  if (error && typeof error === 'object' && !error.metadataError) error.metadataError = true;
+  throw error;
+ }
+}
+
+const TEXT_FIELDS = new Set(['Title', 'Author', 'Subject', 'Keywords', 'Creator', 'Producer']);
+const INFO_TYPES = 'text, a number, a boolean or a PDF name';
+
+// Source sidecar reports describe the original file. Their values are preserved
+// as custom PDF Info fields with an explicit Source prefix, because a PDF Info
+// dictionary has no standard field for a filename, hash, page count or version.
+const SIDECAR_METADATA_FIELDS = new Map([
+ ['version', 'SourcePDFVersion'],
+ ['pages', 'SourcePageCount'],
+ ['encrypted', 'SourceEncrypted'],
+ ['decrypted', 'SourceDecrypted'],
+]);
+
+function sourceFieldName(key) {
+ const cleaned = String(key).replace(/[^A-Za-z0-9]+/g, '');
+ return `Source${cleaned.replace(/^./, character => character.toUpperCase()) || 'Value'}`;
+}
+
+function isSidecarReport(value) {
+ if (!plainObject(value)) return false;
+ const keys = Object.keys(value);
+ if (!keys.length || !keys.every(key => key === 'file' || key === 'metadata' || key === 'xmp')) return false;
+ if (!('file' in value) && !('metadata' in value)) return false;
+ if ('file' in value && !plainObject(value.file)) return false;
+ if ('metadata' in value && !plainObject(value.metadata)) return false;
+ return true;
+}
+
+function describeJsonValue(value) {
+ if (Array.isArray(value)) return value.length ? `an array of ${value.length} item${value.length === 1 ? '' : 's'}` : 'an empty array';
+ if (plainObject(value)) {
+  const keys = Object.keys(value);
+  if (!keys.length) return 'an empty object';
+  return `an object with ${keys.length === 1 ? 'key' : 'keys'} ${keys.slice(0, 3).map(key => `"${key}"`).join(', ')}${keys.length > 3 ? ', …' : ''}`;
+ }
+ if (value === null) return 'null';
+ if (typeof value === 'string') return 'text';
+ return `a ${typeof value}`;
+}
+
+function parseUploadedMetadataStrict(data, filename) {
  if (!(data instanceof Uint8Array) || !/\.json$/i.test(filename || '')) throw new Error('Choose a .json metadata file.');
  if (!data.length || data.length > MAX_USER_METADATA_BYTES) throw new Error('Metadata JSON must be between 1 byte and 8 MB.');
  let parsed;
@@ -29,12 +78,18 @@ export function parseUploadedMetadata(data, filename) {
  const structured = report || 'info' in parsed;
  if (structured) {
   const allowed = report ? ['schema', 'note', 'source', 'info', 'xmp', 'available'] : ['info', 'xmp'];
-  for (const key of Object.keys(parsed)) if (!allowed.includes(key)) throw new Error(`Unsupported metadata field: ${key}.`);
+  for (const key of Object.keys(parsed)) if (!allowed.includes(key)) throw new Error(`Unsupported metadata field: ${key}. Supported keys are ${allowed.join(', ')}.`);
   if (!plainObject(parsed.info)) throw new Error('The info field must be an object.');
  }
  const rawInfo = structured ? parsed.info : parsed;
- const fields = [], seen = new Set(), ignored = [];
- function addField(key, value, custom = false) {
+ // Some downloaders write a sidecar report with the source file details and its
+ // PDF properties, for example
+ // {"file":{"name","sizeBytes","hashes"},"metadata":{"version","pages","Producer","CreationDate"}}.
+ // File hashes and structural details cannot live in PDF Info under their original
+ // names, so they are written as clearly prefixed custom Info fields.
+ const sidecar = !structured && isSidecarReport(parsed);
+ const fields = [], seen = new Set(), ignored = [], problems = [];
+ function addField(key, value, custom = false, path = key) {
   if (value === null) return;
   if (READ_ONLY_FIELDS.has(key)) {
    if (report) {ignored.push(key); return;}
@@ -47,28 +102,67 @@ export function parseUploadedMetadata(data, filename) {
   const type = canonical === 'Trapped' ? 'trapped' : ['CreationDate', 'ModDate'].includes(canonical) ? 'date' : 'value';
   if (type === 'trapped') {
    const name = plainObject(value) && typeof value.name === 'string' ? value.name : value;
-   if (!['True', 'False', 'Unknown'].includes(name)) throw new Error('Trapped must be True, False or Unknown.');
+   if (!['True', 'False', 'Unknown'].includes(name)) throw new Error(`PDF Info field "${path}" must be True, False or Unknown; received ${describeJsonValue(value)}.`);
    fields.push({key: canonical, type: 'name', value: name});
   } else if (type === 'date') {
    const pdfDate = typeof value === 'string' && /^D:\d{4}(?:\d{2}){0,5}(?:Z|[+-]\d{2}'?\d{2}'?)?$/.test(value);
    const isoDate = typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(value) && !Number.isNaN(Date.parse(value));
-   if (!pdfDate && !isoDate) throw new Error(`${canonical} must be a PDF date or an ISO date-time.`);
+   if (!pdfDate && !isoDate) throw new Error(`PDF Info field "${path}" must be a PDF date or an ISO date-time; received ${describeJsonValue(value)}.`);
    fields.push({key: canonical, type: 'date', value});
-  } else if (['Title', 'Author', 'Subject', 'Keywords', 'Creator', 'Producer'].includes(canonical)) {
-   if (typeof value !== 'string') throw new Error(`${canonical} must be text.`);
-   fields.push({key: canonical, type: 'text', value});
+  } else if (TEXT_FIELDS.has(canonical)) {
+   // A list of names is a common JSON representation of a text field; PDF stores it as one string.
+   const items = Array.isArray(value) ? value : null;
+   const list = items && items.every(item => typeof item === 'string' || typeof item === 'number' || typeof item === 'boolean');
+   if (typeof value === 'string') fields.push({key: canonical, type: 'text', value});
+   else if (list) fields.push({key: canonical, type: 'text', value: items.map(item => String(item)).join(', ')});
+   else problems.push(`PDF Info field "${path}" must be text or a list of names; received ${describeJsonValue(value)}.`);
   } else if (typeof value === 'string' || typeof value === 'boolean' || typeof value === 'number' && Number.isFinite(value)) {
    fields.push({key: canonical, type: typeof value, value});
   } else if (plainObject(value) && typeof value.name === 'string' && Object.keys(value).length === 1) {
    fields.push({key: canonical, type: 'name', value: value.name});
-  } else throw new Error(`PDF Info field ${canonical} must be text, a number, a boolean or a PDF name.`);
+  } else {
+   // PDF Info values are flat scalars. Nested objects and arrays have no native
+   // representation, so name the exact field instead of writing a misleading value.
+   problems.push(`PDF Info field "${path}" must be ${INFO_TYPES}; received ${describeJsonValue(value)}.`);
+  }
  }
- for (const [key, value] of Object.entries(rawInfo)) {
+ if (sidecar) {
+  for (const [key, value] of Object.entries(parsed.metadata || {})) {
+   const path = `metadata.${key}`;
+   if (value === null) continue;
+   const mapped = SIDECAR_METADATA_FIELDS.get(key);
+   if (mapped) addField(mapped, value, true, path);
+   else addField(key, value, false, path);
+  }
+  if (parsed.file !== undefined) {
+   if (!plainObject(parsed.file)) throw new Error('The file field must be an object of source file details.');
+   for (const [key, value] of Object.entries(parsed.file)) {
+    const path = `file.${key}`;
+    if (value === null) continue;
+    if (key === 'hashes') {
+     if (!plainObject(value)) { problems.push(`PDF Info field "${path}" must be an object of hash values; received ${describeJsonValue(value)}.`); continue; }
+     for (const [algorithm, digest] of Object.entries(value)) {
+      if (digest === null) continue;
+      if (typeof digest !== 'string') { problems.push(`PDF Info hash "${path}.${algorithm}" must be text; received ${describeJsonValue(digest)}.`); continue; }
+      addField(sourceFieldName(algorithm), digest, true, `${path}.${algorithm}`);
+     }
+    } else if (key === 'name') addField('SourceFilename', value, true, path);
+    else if (key === 'sizeBytes') addField('SourceFileSizeBytes', value, true, path);
+    else if (plainObject(value) || Array.isArray(value)) problems.push(`PDF Info field "${path}" must be ${INFO_TYPES}; received ${describeJsonValue(value)}.`);
+    else addField(sourceFieldName(key), value, true, path);
+   }
+  }
+ } else for (const [key, value] of Object.entries(rawInfo)) {
+  const path = structured ? `info.${key}` : key;
   if (key === 'Custom') {
-   if (!plainObject(value)) throw new Error('Custom PDF Info fields must be an object.');
-   for (const [customKey, customValue] of Object.entries(value)) addField(customKey, customValue, true);
+   if (!plainObject(value)) throw new Error(`The ${path} field must be an object of custom PDF Info values.`);
+   for (const [customKey, customValue] of Object.entries(value)) addField(customKey, customValue, true, `${path}.${customKey}`);
   } else if (!structured && (key === 'xmp' || key === 'XMP')) continue;
-  else addField(key, value);
+  else addField(key, value, false, path);
+ }
+ if (problems.length) {
+  const shown = problems.slice(0, 3).join(' ');
+  throw new Error(`${shown}${problems.length > 3 ? ` ${problems.length - 3} more PDF Info field${problems.length - 3 === 1 ? ' is' : 's are'} unsupported.` : ''} Nothing was changed or downloaded. PDF Info values must be ${INFO_TYPES}; nested objects and arrays cannot be stored.`);
  }
  if (fields.length > 200) throw new Error('Metadata has more than 200 PDF Info fields.');
  const xmp = structured ? parsed.xmp : parsed.xmp ?? parsed.XMP;
@@ -81,7 +175,7 @@ export function parseUploadedMetadata(data, filename) {
   if (xmpRaw && (!xmpRaw.trim().startsWith('<') || /<!\s*(?:DOCTYPE|ENTITY)/i.test(xmpRaw))) throw new Error('XMP must be XML without a document type declaration.');
   if (xmpRaw && typeof DOMParser !== 'undefined' && new DOMParser().parseFromString(xmpRaw, 'application/xml').querySelector('parsererror')) throw new Error('XMP XML is not well formed.');
  }
- return {name: filename, byteLength: data.length, fields, xmpRaw: xmpRaw || null, ignored};
+ return {name: filename, byteLength: data.length, fields, xmpRaw: xmpRaw || null, ignored, format: sidecar ? 'sidecar' : report ? 'report' : structured ? 'info' : 'flat'};
 }
 
 export function makeSourceMetadataRecord({filename,byteLength,pageCount,inspection,metadata}) {

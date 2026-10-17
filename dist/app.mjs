@@ -12,7 +12,7 @@ let paintQueue=Promise.resolve(), generation=0, inline=null;
 const loadedFonts=new Map();
 let positionLocks=new Map();
 let signatureState={locked:false,signed:false,count:0,unknown:false};
-let sourceMetadata=null, uploadedMetadata=null, metadataReadVersion=0, metadataLoading=false;
+let sourceMetadata=null, uploadedMetadata=null, metadataReadVersion=0, metadataLoading=false, encryptMetadataVersion=0, skippedEncryptMetadata='';
 function signatureProtectionMessage(){if(!signatureState.unknown)return 'Digital signature detected. Editing is locked and download returns the original file unchanged. Signature validity is not verified here.';if(signatureState.reason==='encrypted')return 'This PDF is encrypted. The viewer can open it, but the export engine cannot safely inspect or rewrite encrypted PDFs. It is view-only; download returns the original unchanged. Request an unsigned, unencrypted editing copy from the issuer.';if(signatureState.reason==='library')return 'The PDF inspection library did not load. Reload the page and upload the PDF again. Editing stays locked until inspection succeeds; download returns the original unchanged.';return 'The PDF structure could not be fully inspected. This does not mean a signature was detected. Editing stays locked to protect any existing signature; download returns the original unchanged. Try a fresh original PDF from the issuer.';}
 function signatureLockNotice(){notice(signatureProtectionMessage())}
 
@@ -87,12 +87,18 @@ function clearSigning(){certificateReadVersion++;signingCredential=null;$('p12-p
 async function inspectP12(){const readVersion=++certificateReadVersion;signingCredential=null;$('p12-sign').disabled=true;$('p12-inspect').disabled=true;try{const file=$('p12-file').files[0];if(!file)throw new Error('Choose a PFX or P12 certificate.');if(!/\.(pfx|p12)$/i.test(file.name))throw new Error('Choose a .pfx or .p12 file.');const bytes=new Uint8Array(await file.arrayBuffer());if(readVersion!==certificateReadVersion){bytes.fill(0);return;}try{signingCredential=readCertificate(bytes,$('p12-password').value,window.forge);}finally{bytes.fill(0);$('p12-password').value='';}$('p12-info').textContent=JSON.stringify(signingCredential.info,null,2);$('sign-feedback').textContent='Certificate read. Check the identity and confirm your signing authority.';$('p12-sign').disabled=!$('p12-authorized').checked;}catch(e){$('p12-info').textContent='Certificate could not be read.';$('sign-feedback').textContent=e.message;}finally{$('p12-inspect').disabled=false;}}
 async function downloadSignedCopy(){finishInline();if(!doc||busy||metadataLoading||signatureState.locked||!signingCredential||!$('p12-authorized').checked)return;const credential=signingCredential;setBusy(true);$('p12-sign').disabled=true;$('sign-close').disabled=true;$('p12-inspect').disabled=true;$('sign-feedback').textContent='Preparing and signing the new copy…';try{await paintQueue;const bytes=await exportNativePdf({original,edits,getPage,fonts:loadedFonts,PDFLib,fontkit:window.fontkit,metadataRecord:sourceMetadata,uploadedMetadata,onProgress:status});const result=await signPdfCopy({bytes,sourceBytes:original,credential,PDFLib,forge:window.forge});const name=filename.replace(/\.pdf$/i,'')+'-signed-copy.pdf';download(new Blob([result.bytes],{type:'application/pdf'}),name);fingerprintedPdf={blob:new Blob([result.bytes],{type:'application/pdf'}),name};$('hash-pdf-download').disabled=false;hashRecord={file:name,kind:'new signed copy',signer:result.signer,source:result.source,...result.fingerprints};$('hash-info').textContent=JSON.stringify(hashRecord,null,2);$('hash-download').disabled=false;clearSigning();$('sign-dialog').close();$('hash-dialog').showModal();status('Signed copy downloaded · original retained');notice('New signature added with your certificate. Check certificate trust in your PDF reader.');}catch(e){$('sign-feedback').textContent=e.message||'Signing failed.';}finally{signingCredential=null;$('p12-sign').disabled=true;$('p12-password').value='';$('p12-inspect').disabled=false;$('sign-close').disabled=false;setBusy(false);}}
 async function calculateFingerprints(current){finishInline();if(!doc||busy||metadataLoading)return;setBusy(true);$('hash-original').disabled=$('hash-current').disabled=true;try{await paintQueue;const bytes=current&&!signatureState.locked?await exportNativePdf({original,edits,getPage,fonts:loadedFonts,PDFLib,fontkit:window.fontkit,metadataRecord:sourceMetadata,uploadedMetadata}):original.slice();const name=current&&!signatureState.locked?currentExportName():filename;fingerprintedPdf={blob:new Blob([bytes],{type:'application/pdf'}),name};$('hash-pdf-download').disabled=false;hashRecord={file:name,kind:current&&!signatureState.locked?'current native export':'original',...await fingerprints(bytes)};$('hash-info').textContent=JSON.stringify(hashRecord,null,2);$('hash-download').disabled=false;}catch(e){$('hash-info').textContent=e.message||'Fingerprint calculation failed.';}finally{$('hash-original').disabled=$('hash-current').disabled=false;setBusy(false);}}
+function describeMetadataFields(upload,limit=8){
+ const names=upload.fields.map(field=>field.key);
+ const shown=names.slice(0,limit).join(', ')+(names.length>limit?`, … (${names.length-limit} more)`:'');
+ return shown||'no Info fields';
+}
 function metadataUploadStatus(){
  if(signatureState.locked){$('metadata-upload-status').textContent='This PDF is view-only. Uploaded metadata cannot be embedded.';return}
  if(!uploadedMetadata){$('metadata-upload-status').textContent='No metadata replacement loaded. The source PDF’s native Info/XMP is retained.';return}
- const info=uploadedMetadata.fields.length?`Its ${uploadedMetadata.fields.length} Info field${uploadedMetadata.fields.length===1?'':'s'} replace PDF Info`:'It removes the PDF Info dictionary';
- const xmp=uploadedMetadata.xmpRaw?'the supplied XMP replaces existing XMP':'existing XMP is removed';
- $('metadata-upload-status').textContent=`${uploadedMetadata.name} (${formatBytes(uploadedMetadata.byteLength)}) loaded for export. ${info} and ${xmp}; omitted original fields are removed.${uploadedMetadata.ignored.length?' Non-metadata PDF structure fields were ignored.':''}`;
+ const info=uploadedMetadata.fields.length?`Its ${uploadedMetadata.fields.length} Info field${uploadedMetadata.fields.length===1?'':'s'} replace PDF Info: ${describeMetadataFields(uploadedMetadata)}.`:'It removes the PDF Info dictionary.';
+ const xmp=uploadedMetadata.xmpRaw?'The supplied XMP replaces existing XMP.':'Existing XMP is removed.';
+ const kind=uploadedMetadata.format==='sidecar'?' Source file report recognised; file hashes and structure are stored as Source… custom Info fields.':'';
+ $('metadata-upload-status').textContent=`${uploadedMetadata.name} (${formatBytes(uploadedMetadata.byteLength)}) loaded for export. ${info} ${xmp} Omitted original fields are removed.${kind}${uploadedMetadata.ignored.length?' Non-metadata PDF structure fields were ignored.':''}`;
 }
 function invalidateCurrentExportFingerprint(){
  if(hashRecord?.kind!=='current native export')return;
@@ -111,12 +117,112 @@ async function selectMetadataUpload(file){
  }catch(error){if(version===metadataReadVersion&&active===doc){metadataUploadStatus();notice(error.message||'Could not read metadata JSON.')}}
  finally{if(version===metadataReadVersion){metadataLoading=false;if(!loaded)$('metadata-file').value='';sync()}}
 }
-function clearEncryptionForm(){for(const id of ['encrypt-file','encrypt-metadata','encrypt-password','encrypt-confirm','encrypt-owner'])$(id).value='';$('encrypt-feedback').hidden=true;$('encrypt-feedback').textContent='';}
-async function encryptStandalonePdf(event){event.preventDefault();if(busy)return;const file=$('encrypt-file').files[0],password=$('encrypt-password').value,ownerPassword=$('encrypt-owner').value,metadataFile=$('encrypt-metadata').files[0];if(!file){$('encrypt-feedback').textContent='Choose a PDF first.';$('encrypt-feedback').hidden=false;return}if(password!==$('encrypt-confirm').value){$('encrypt-feedback').textContent='The open passwords do not match.';$('encrypt-feedback').hidden=false;return}if(!$('encrypt-form').reportValidity())return;$('encrypt-submit').disabled=true;$('encrypt-close').disabled=true;$('encrypt-feedback').hidden=false;$('encrypt-feedback').textContent='Preparing the encrypted copy…';setBusy(true);try{let metadataPayload=null;if(metadataFile){if(!metadataFile.size||metadataFile.size>MAX_USER_METADATA_BYTES)throw new Error('Metadata JSON must be between 1 byte and 8 MB.');metadataPayload={name:metadataFile.name,data:new Uint8Array(await metadataFile.arrayBuffer())}}const bytes=new Uint8Array(await file.arrayBuffer()),encrypted=await encryptPdfCopy({bytes,password,ownerPassword,metadataFile:metadataPayload,PDFLib,onProgress:message=>{$('encrypt-feedback').textContent=message;status(message)}});const name=file.name.replace(/\.pdf$/i,'')+'-encrypted.pdf';download(new Blob([encrypted],{type:'application/pdf'}),name);$('encrypt-dialog').close();clearEncryptionForm();status(`Encrypted PDF downloaded · ${formatBytes(encrypted.length)}`);notice(metadataPayload?'PDF encrypted with AES-256 and native Info/XMP replaced from your JSON. Keep the open password safe; it cannot be recovered.':'PDF encrypted with AES-256; existing native metadata was retained. Keep the open password safe; it cannot be recovered.')}catch(error){$('encrypt-feedback').textContent=error.message||'Could not encrypt this PDF.'}finally{setBusy(false);$('encrypt-submit').disabled=false;$('encrypt-close').disabled=false;$('encrypt-password').value='';$('encrypt-confirm').value='';$('encrypt-owner').value=''}}
+function clearEncryptionForm(){skippedEncryptMetadata='';encryptMetadataVersion++;for(const id of ['encrypt-file','encrypt-metadata','encrypt-password','encrypt-confirm','encrypt-owner'])$(id).value='';$('encrypt-feedback').hidden=true;$('encrypt-feedback').textContent='';$('encrypt-without-metadata').hidden=true;setEncryptMetadataStatus('');}
+function showEncryptMetadataFallback(name,message){
+ $('encrypt-fallback-message').textContent=`The selected file “${name}” cannot be used as PDF metadata. ${message}`;
+ $('encrypt-fallback-dialog').dataset.metadataName=name;
+ $('encrypt-fallback-dialog').showModal();
+}
+async function encryptStandalonePdf(event){
+ event.preventDefault();
+ if(busy)return;
+ const skippedThisRun=skippedEncryptMetadata;
+ skippedEncryptMetadata='';
+ const file=$('encrypt-file').files[0],password=$('encrypt-password').value,ownerPassword=$('encrypt-owner').value,metadataFile=$('encrypt-metadata').files[0];
+ $('encrypt-without-metadata').hidden=true;
+ if(!file){$('encrypt-feedback').textContent='Choose a PDF first.';$('encrypt-feedback').hidden=false;return}
+ if(password!==$('encrypt-confirm').value){$('encrypt-feedback').textContent='The open passwords do not match.';$('encrypt-feedback').hidden=false;return}
+ if(!$('encrypt-form').reportValidity())return;
+ let metadataPayload=null;
+ if(metadataFile){
+  try{
+   if(!metadataFile.size||metadataFile.size>MAX_USER_METADATA_BYTES){const error=new Error('Metadata JSON must be between 1 byte and 8 MB.');error.metadataError=true;throw error}
+   const data=new Uint8Array(await metadataFile.arrayBuffer());
+   parseUploadedMetadata(data,metadataFile.name);
+   metadataPayload={name:metadataFile.name,data};
+  }catch(error){
+   if(error.metadataError){
+    setEncryptMetadataStatus(error.message,true);
+    $('encrypt-feedback').textContent=error.message;
+    $('encrypt-feedback').hidden=false;
+    showEncryptMetadataFallback(metadataFile.name,error.message);
+    return;
+   }
+   $('encrypt-feedback').textContent=error.message||'Could not read the metadata JSON.';
+   $('encrypt-feedback').hidden=false;
+   return;
+  }
+ }
+ $('encrypt-submit').disabled=true;$('encrypt-close').disabled=true;$('encrypt-feedback').hidden=false;$('encrypt-feedback').textContent='Preparing the encrypted copy…';
+ setBusy(true);
+ try{
+  const bytes=new Uint8Array(await file.arrayBuffer());
+  const encrypted=await encryptPdfCopy({bytes,password,ownerPassword,metadataFile:metadataPayload,PDFLib,onProgress:message=>{$('encrypt-feedback').textContent=message;status(message)}});
+  const name=file.name.replace(/\.pdf$/i,'')+'-encrypted.pdf';
+  download(new Blob([encrypted],{type:'application/pdf'}),name);
+  $('encrypt-dialog').close();
+  clearEncryptionForm();
+  status(`Encrypted PDF downloaded · ${formatBytes(encrypted.length)}`);
+  notice(skippedThisRun?`PDF encrypted with AES-256. The selected JSON “${skippedThisRun}” was not used because it cannot be written as PDF Info/XMP metadata, so the PDF’s existing native metadata was retained. Keep the open password safe; it cannot be recovered.`:metadataPayload?'PDF encrypted with AES-256 and native Info/XMP replaced from your JSON. Keep the open password safe; it cannot be recovered.':'PDF encrypted with AES-256; existing native metadata was retained. Keep the open password safe; it cannot be recovered.');
+ }catch(error){
+  const message=error.message||'Could not encrypt this PDF.';
+  if(error.metadataError){
+   setEncryptMetadataStatus(message,true);
+   $('encrypt-feedback').textContent=`${message} Nothing was downloaded. Fix the JSON and try again, or encrypt without it to keep the PDF’s existing native metadata.`;
+   $('encrypt-without-metadata').hidden=false;
+  }else $('encrypt-feedback').textContent=message;
+ }finally{
+  setBusy(false);$('encrypt-submit').disabled=false;$('encrypt-close').disabled=false;
+ }
+}
+
+function setEncryptMetadataStatus(message,warning=false){$('encrypt-metadata-status').hidden=!message;$('encrypt-metadata-status').textContent=message;$('encrypt-metadata-status').classList.toggle('warning',warning);}
+async function inspectEncryptMetadata(){
+ if(busy)return;
+ const version=++encryptMetadataVersion,file=$('encrypt-metadata').files[0];
+ $('encrypt-without-metadata').hidden=true;$('encrypt-feedback').hidden=true;$('encrypt-feedback').textContent='';
+ if(!file){setEncryptMetadataStatus('');return}
+ try{
+  if(!file.size||file.size>MAX_USER_METADATA_BYTES)throw new Error('Metadata JSON must be between 1 byte and 8 MB.');
+  const data=new Uint8Array(await file.arrayBuffer());
+  if(version!==encryptMetadataVersion)return;
+  const parsed=parseUploadedMetadata(data,file.name);
+  setEncryptMetadataStatus(`${parsed.name} loaded: ${parsed.fields.length} PDF Info field${parsed.fields.length===1?'':'s'} (${describeMetadataFields(parsed)})${parsed.xmpRaw?' and replacement XMP':''}. These become the encrypted PDF’s native Info${parsed.xmpRaw?' and XMP':''}; the JSON file is not attached.${parsed.format==='sidecar'?' Source file report recognised: file hashes and structure are stored as Source… custom fields.':''}`);
+ }catch(error){
+  if(version!==encryptMetadataVersion)return;
+  error.metadataError=true;
+  setEncryptMetadataStatus(`${error.message} Fix the JSON, choose another file, or encrypt without it to keep the PDF’s existing native metadata.`,true);
+  $('encrypt-without-metadata').hidden=false;
+ }
+}
+$('encrypt-metadata').onchange=inspectEncryptMetadata;
+$('encrypt-metadata-clear').onclick=()=>{if(busy)return;encryptMetadataVersion++;$('encrypt-metadata').value='';$('encrypt-without-metadata').hidden=true;$('encrypt-feedback').hidden=true;$('encrypt-feedback').textContent='';setEncryptMetadataStatus('')};
+$('encrypt-without-metadata').onclick=()=>{if(busy)return;encryptMetadataVersion++;$('encrypt-metadata').value='';$('encrypt-without-metadata').hidden=true;$('encrypt-feedback').hidden=true;$('encrypt-feedback').textContent='';setEncryptMetadataStatus('Encrypting without a metadata JSON; the PDF’s existing native metadata is retained.');$('encrypt-form').requestSubmit()};
+$('encrypt-fallback-continue').onclick=()=>{const name=$('encrypt-fallback-dialog').dataset.metadataName||'The selected JSON';skippedEncryptMetadata=name;encryptMetadataVersion++;$('encrypt-metadata').value='';$('encrypt-without-metadata').hidden=true;setEncryptMetadataStatus(`Encrypting without “${name}”; the PDF’s existing native Info/XMP metadata is retained.`,true);$('encrypt-fallback-dialog').close();$('encrypt-feedback').hidden=true;$('encrypt-feedback').textContent='';$('encrypt-form').requestSubmit()};
+$('encrypt-fallback-back').onclick=()=>{$('encrypt-fallback-dialog').close();$('encrypt-metadata').focus()};
+$('encrypt-fallback-close').onclick=()=>$('encrypt-fallback-dialog').close();
 $('encrypt').onclick=()=>{if(busy)return;clearEncryptionForm();$('encrypt-dialog').showModal()};$('encrypt-close').onclick=()=>{if(busy)return;clearEncryptionForm();$('encrypt-dialog').close()};$('encrypt-dialog').addEventListener('cancel',event=>{if(busy)event.preventDefault();else clearEncryptionForm()});$('encrypt-form').onsubmit=encryptStandalonePdf;
 $('metadata').onclick=()=>{if(!doc||busy||!sourceMetadata)return;$('metadata-info').textContent=metadataJson(sourceMetadata);metadataUploadStatus();$('metadata-dialog').showModal();};$('metadata-close').onclick=()=>$('metadata-dialog').close();$('metadata-download').onclick=()=>{if(!sourceMetadata)return;download(new Blob([metadataJson(sourceMetadata)],{type:'application/json'}),'pdf-studio-source-metadata.json');status('Source metadata JSON downloaded');};$('metadata-file').onchange=()=>selectMetadataUpload($('metadata-file').files[0]);$('metadata-remove').onclick=()=>{if(!uploadedMetadata||busy||metadataLoading)return;metadataReadVersion++;uploadedMetadata=null;$('metadata-file').value='';invalidateCurrentExportFingerprint();metadataUploadStatus();sync();status('Metadata replacement removed from the next export');};
 $('sign').onclick=()=>{if(doc&&!busy&&!signatureState.locked){clearSigning();$('sign-dialog').showModal();}};$('sign-close').onclick=()=>{clearSigning();$('sign-dialog').close();};$('sign-dialog').addEventListener('cancel',e=>{if(busy)e.preventDefault();else clearSigning();});$('sign-dialog').addEventListener('close',()=>{if(!busy)clearSigning();});$('p12-inspect').onclick=inspectP12;$('p12-file').onchange=()=>{certificateReadVersion++;signingCredential=null;$('p12-sign').disabled=true;$('p12-authorized').checked=false;$('p12-info').textContent='Read the selected certificate to inspect its identity.';};$('p12-authorized').onchange=()=>{$('p12-sign').disabled=!signingCredential||!$('p12-authorized').checked;};$('p12-sign').onclick=downloadSignedCopy;$('hashes').onclick=()=>{if(!doc||busy)return;$('hash-dialog').showModal();};$('hash-close').onclick=()=>$('hash-dialog').close();$('hash-original').onclick=()=>calculateFingerprints(false);$('hash-current').onclick=()=>calculateFingerprints(true);$('hash-pdf-download').onclick=()=>{if(fingerprintedPdf)download(fingerprintedPdf.blob,fingerprintedPdf.name);};$('hash-download').onclick=()=>{if(hashRecord)download(new Blob([JSON.stringify(hashRecord,null,2)],{type:'application/json'}),'pdf-fingerprints.json');};
-function download(blob,name){const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),2000)}
+const downloadUrls=new Map();
+// Sandboxed preview iframes can silently block programmatic downloads. The anchor
+// must be in the document, and a persistent link lets the user retry or save
+// manually when the automatic download never reaches their browser.
+function download(blob,name){
+ const url=URL.createObjectURL(blob);
+ try{const anchor=document.createElement('a');anchor.href=url;anchor.download=name;anchor.rel='noopener';anchor.style.display='none';document.body.append(anchor);anchor.click();anchor.remove()}catch{}
+ downloadUrls.set(url,setTimeout(()=>{downloadUrls.delete(url);URL.revokeObjectURL(url)},10*60*1000));
+ $('download-ready-name').textContent=name;
+ const link=$('download-ready-link');link.href=url;link.download=name;link.textContent='Save again';
+ $('download-ready-open').href=url;
+ const embedded=window.self!==window.top;
+ $('download-ready-hint').textContent=`${formatBytes(blob.size)} ready. If the file did not appear in your Downloads, use the save link${embedded?' or open the preview in its own tab, because embedded previews can block automatic downloads':''}.`;
+ $('download-ready-newtab').hidden=!embedded;
+ $('download-ready').hidden=false;
+}
+$('download-ready-close').onclick=()=>{$('download-ready').hidden=true};
+$('encrypt-download-hint').hidden=window.self===window.top;
+$('download-ready-newtab').onclick=()=>{window.open(location.href,'_blank','noopener')};
 async function loadFont(file){if(!file)return;try{if(!/\.(ttf|otf)$/i.test(file.name))throw new Error('Use a TTF or OTF font for native PDF export.');const family=`UploadedFont${++fontCounter}`,data=new Uint8Array(await file.arrayBuffer()),parsed=window.fontkit.create(data);if(!parsed.familyName||typeof parsed.hasGlyphForCodePoint!=='function')throw new Error('Use a single TTF/OTF font, not a font collection.');const loadedStyle=infer(parsed.subfamilyName||parsed.fullName),face=new FontFace(family,data.slice().buffer,{weight:loadedStyle.bold?'700':'400',style:loadedStyle.italic?'italic':'normal'});await face.load();document.fonts.add(face);loadedFonts.set(family,{face,data,name:file.name,parsed,style:loadedStyle});$('font').append(new Option(file.name.replace(/\.[^.]+$/,''),family));$('font').value=family;$('bold').checked=loadedStyle.bold;$('italic').checked=loadedStyle.italic;$('fontstatus').textContent=matchingStatus({...currentBlock(),font:family});notice('Font loaded: '+(parsed.fullName||file.name)+'. Use Best font match to compare its family, style and character coverage.')}catch(error){notice(error.message||'This font could not be loaded. Try a valid TTF or OTF font.')}finally{$('fontfile').value=''}}
 async function practice(){const p=await PDFLib.PDFDocument.create();const page=p.addPage([595.28,841.89]);const font=await p.embedFont(PDFLib.StandardFonts.Helvetica),bold=await p.embedFont(PDFLib.StandardFonts.HelveticaBold),italic=await p.embedFont(PDFLib.StandardFonts.HelveticaOblique);page.drawText('PRACTICE',{x:160,y:430,size:64,font:bold,color:PDFLib.rgb(.75,.82,.95),rotate:PDFLib.degrees(35),opacity:.45});page.drawText('DESIGN STUDIO',{x:54,y:775,size:20,font:bold,color:PDFLib.rgb(.1,.22,.48)});page.drawText('A document for practicing text edits',{x:54,y:747,size:12,font:italic,color:PDFLib.rgb(.4,.45,.55)});page.drawLine({start:{x:54,y:727},end:{x:540,y:727},thickness:1,color:PDFLib.rgb(.8,.85,.92)});page.drawText('Typography & alignment',{x:54,y:679,size:16,font:bold});page.drawText('Select any line to change its font, size, spacing or color.',{x:54,y:651,size:12,font});page.drawText('Change the amount below and choose Fixed decimal point.',{x:54,y:626,size:12,font});page.drawText('The original artwork stays behind the replacement text.',{x:54,y:601,size:12,font});page.drawText('Amount',{x:54,y:510,size:12,font:bold});page.drawText('1234.56',{x:410,y:510,size:16,font});page.drawText('0123456789',{x:54,y:460,size:12,font});page.drawText('Header, body and footer text can all be selected.',{x:54,y:367,size:12,font});page.drawLine({start:{x:54,y:85},end:{x:540,y:85},thickness:1,color:PDFLib.rgb(.8,.85,.92)});page.drawText('Practice document | Page 1',{x:54,y:60,size:10,font,color:PDFLib.rgb(.4,.45,.55)});const second=p.addPage([595.28,841.89]);second.drawText('Second page',{x:54,y:775,size:20,font:bold});second.drawText('Untouched pages retain their original PDF structure.',{x:54,y:733,size:12,font});const bytes=await p.save();await openFile(new File([bytes],'practice.pdf',{type:'application/pdf'}))}
 $('matchfont').onclick=chooseBestFont;$('open').onclick=$('emptyopen').onclick=()=>{if(!busy)$('file').click()};$('file').onchange=()=>openFile($('file').files[0]);$('sample').onclick=practice;$('zoom').onchange=refreshDocumentZoom;$('prev').onclick=()=>navigate(pageNo-1);$('next').onclick=()=>navigate(pageNo+1);$('add').onclick=add;$('apply').onclick=()=>{if(inline)finishInline();else apply()};$('undo').onclick=undo;$('redo').onclick=redo;$('export').onclick=exportPdf;$('loadfont').onclick=()=>$('fontfile').click();$('fontfile').onchange=()=>loadFont($('fontfile').files[0]);$('controls').onsubmit=e=>{e.preventDefault();apply()};$('align').onchange=()=>{const b=currentBlock();if(!b)return;const previous=b.align,next=$('align').value;$('decimalhelp').hidden=next!=='decimal';if(next==='decimal'&&previous!=='decimal'&&!positionLocks.get(b.id)?.x){const ctx=canvasForPage(b.page).getContext('2d');const line=b.text.split('\n')[0],i=line.indexOf('.');$('x').value=(textStart(ctx,b,line)+measure(ctx,b,i<0?line:line.slice(0,i))+(i>0?b.spacing*b.scaleX:0)).toFixed(2)}};$('reset').onclick=()=>{if(!selected)return;const id=selected;commit(()=>edits.delete(id));if(originalBlock(id))select(id);else{selected=null;$('controls').hidden=true;$('selectionhint').hidden=false}};$('delete').onclick=()=>{const b=currentBlock();if(!b||!(b.canEdit||b.added))return;commit(()=>b.added?edits.delete(b.id):edits.set(b.id,{...b,removed:true}));selected=null;$('controls').hidden=true;$('selectionhint').hidden=false};document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'&&!/INPUT|TEXTAREA/.test(e.target.tagName)){e.preventDefault();e.shiftKey?redo():undo()}});for(const event of ['dragenter','dragover'])$('drop').addEventListener(event,e=>{e.preventDefault();e.dataTransfer.dropEffect='copy'});$('drop').addEventListener('drop',e=>{e.preventDefault();const file=e.dataTransfer.files[0];if(file)openFile(file)});

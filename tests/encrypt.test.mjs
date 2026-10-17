@@ -153,6 +153,11 @@ test('invalid metadata JSON is rejected before encryption', async () => {
  let encryptCalls = 0;
  const encrypt = async () => { encryptCalls++; return new Uint8Array(); };
  const attempt = (file) => encryptPdfCopy({bytes: source, password: 'open-password-123', PDFLib: L, metadataFile: file, encrypt});
+ await assert.rejects(attempt(metadataFile({info: {Custom: {Profile: {id: 7}}}})), (error) => {
+  assert.equal(error.metadataError, true);
+  assert.match(error.message, /"info\.Custom\.Profile" must be text, a number, a boolean or a PDF name.*received an object/);
+  return true;
+ });
  await assert.rejects(attempt({name: 'metadata.txt', data: encode('{"Title":"No"}')}), /\.json/);
  await assert.rejects(attempt({name: 'metadata.json', data: Uint8Array.of(0xff)}), /UTF-8 JSON object/);
  await assert.rejects(attempt({name: 'metadata.json', data: new Uint8Array(8 * 1024 * 1024 + 1)}), /8 MB/);
@@ -184,4 +189,29 @@ test('existing encrypted and digitally signed PDFs are not rewritten', async () 
   bytes: signed, password: 'open-password-123', PDFLib: L,
   metadataFile: metadataFile({Title: 'Must not bypass'}),
  }), /digital signature/);
+});
+
+test('sidebar-style file metadata JSON is applied to the encrypted PDF', async () => {
+ const source = await samplePdf();
+ const sidecar = {
+  file: {name: '62271XXXX_DownloadStatement_1792215212.pdf', sizeBytes: 583255, hashes: {'SHA-1': 'abc123', 'SHA-256': 'def456'}},
+  metadata: {version: '1.4', pages: 15, encrypted: true, Producer: 'openhtmltopdf.com', CreationDate: "D:20261017110332+05'30'", decrypted: true},
+ };
+ let prepared = null;
+ const encrypted = await encryptPdfCopy({
+  bytes: source, password: 'open-password-123', PDFLib: L,
+  metadataFile: metadataFile(sidecar),
+  encrypt: captureEncrypt(bytes => { prepared = bytes; }),
+ });
+ const pdf = await L.PDFDocument.load(prepared, {updateMetadata: false});
+ assert.equal(pdf.getProducer(), 'openhtmltopdf.com');
+ assert.equal(pdf.getTitle(), undefined); // Omitted original Info fields are removed.
+ assert.equal(infoEntries(pdf)['/SourcePageCount'], '15');
+ assert.equal(infoEntries(pdf)['/SourceEncrypted'], 'true');
+ assert.equal(infoEntries(pdf)['/SourceFilename'], L.PDFHexString.fromText('62271XXXX_DownloadStatement_1792215212.pdf').toString());
+ assert.equal(pdf.catalog.get(key('Names')), undefined);
+ assert.match(decode(encrypted), /\/Encrypt/);
+ const encryptedPdf = await L.PDFDocument.load(encrypted, {ignoreEncryption: true, updateMetadata: false});
+ assert.ok(Object.keys(infoEntries(encryptedPdf)).includes('/SourceSHA256'), 'sidecar fields survive in the encrypted Info dictionary');
+ assert.ok(Object.keys(infoEntries(encryptedPdf)).includes('/Producer'));
 });
