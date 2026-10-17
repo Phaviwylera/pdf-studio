@@ -1,6 +1,6 @@
 # PDF Studio
 
-Browser-local PDF text editing with continuous scrolling, native-text export, source metadata inspection and optional replacement, standalone AES-256 PDF encryption with optional JSON-based native metadata replacement, fixed-decimal alignment, per-text X/Y position locks, SHA-256/SHA-512 fingerprints, and authorized RSA PFX/P12 signing.
+Browser-local PDF text editing with continuous scrolling, native-text export, password-protected PDF decryption in WebAssembly, source metadata inspection and optional replacement, standalone AES-256 PDF encryption with optional JSON-based native metadata replacement, fixed-decimal alignment, per-text X/Y position locks, SHA-256/SHA-512 fingerprints, and authorized RSA PFX/P12 signing.
 
 Live app: https://pdf-studio.phavithiranofficial.chatgpt.site
 
@@ -43,7 +43,7 @@ To **replace the PDF's native metadata**, choose a UTF-8 `.json` file (up to 8 M
 
 Its mapping is: `metadata` keys that name standard PDF fields (`Title`, `Author`, `Subject`, `Keywords`, `Creator`, `Producer`, `CreationDate`, `ModDate`, `Trapped`) become those native Info fields; `metadata.version`, `pages`, `encrypted` and `decrypted` become the custom fields `SourcePDFVersion`, `SourcePageCount`, `SourceEncrypted` and `SourceDecrypted`; `file.name` and `file.sizeBytes` become `SourceFilename` and `SourceFileSizeBytes`; each `file.hashes` entry becomes `SourceSHA1`, `SourceSHA256`, `SourceSHA384`, `SourceSHA512`, etc.; other scalar `file` values become `Source<Key>`. Optional top-level `xmp` works as above. In a flat object, every top-level key except `xmp`/`XMP` and `Custom` is treated as an Info field. Other nested objects and arrays have no native PDF Info representation: the error names the exact JSON field and received type, and an encryption attempt offers **Encrypt without metadata** instead of silently dropping values. PDF.js-derived properties (page count, PDF version, encryption, signatures, etc.) are not writable metadata; they are ignored in an app-generated report or rejected in other files. Unsupported values are rejected rather than silently inserted. The source provenance attachment and uploaded JSON are **not** newly attached when overriding metadata.
 
-After a successful upload, the Metadata dialog keeps the selected filename visible and confirms that the replacement is loaded for export. The replacement is kept in browser memory for the current document, can be removed before export, and is cleared when another PDF opens. Even with no text edits, replacing metadata rewrites the PDF and changes its size and hashes. This is descriptive metadata, **not** a digital signature or proof of issuer identity. Signed, encrypted, or uninspectable PDFs remain view-only in the editor. This metadata-replacement flow does not decrypt PDFs or extract certificates.
+After a successful upload, the Metadata dialog keeps the selected filename visible and confirms that the replacement is loaded for export. The replacement is kept in browser memory for the current document, can be removed before export, and is cleared when another PDF opens. Even with no text edits, replacing metadata rewrites the PDF and changes its size and hashes. This is descriptive metadata, **not** a digital signature or proof of issuer identity. Signed or uninspectable PDFs remain view-only in the editor. Password-protected PDFs can be opened with their password and are decrypted to an editable working copy in-browser with qpdf compiled to WebAssembly. The uploaded bytes are never modified. If qpdf cannot safely decrypt a PDF, it stays view-only. This metadata-replacement flow does not extract certificates.
 
 ## Encrypt a PDF
 
@@ -57,7 +57,7 @@ Run metadata, export, and encryption regression tests with `node --test tests/*.
 
 ## Protection and signing
 
-In the editor, signed, encrypted, and uninspectable PDFs remain view-only, and original download remains unchanged. The standalone Encrypt PDF action accepts only unencrypted, unsigned sources. Existing signatures are detected structurally, not validated cryptographically by the viewer.
+In the editor, signed and uninspectable PDFs remain view-only. A password-protected PDF is decrypted only after its password is accepted, using qpdf/WASM in the browser; the unlocked working copy can then be edited and exported. The exact uploaded bytes remain available unchanged: locked/signed downloads and **Hash original** use those bytes. Wrong or cancelled passwords, or a PDF that qpdf cannot safely decrypt, do not unlock editing and show a clear view-only message. The standalone Encrypt PDF action accepts only unencrypted, unsigned sources. Existing signatures are detected structurally, not validated cryptographically by the viewer.
 
 New signed copies use an authorized user-provided RSA 2048+ PFX/P12 certificate and include a signing record page. Certificates/passwords are processed in browser memory, not uploaded. Expiry, key matching, and declared key usage are checked. Certificate trust, revocation, and trusted timestamps are not checked. This does not restore an issuer signature after changes. SHA-256/SHA-512 identify exact file bytes, not issuer identity.
 
@@ -66,11 +66,13 @@ New signed copies use an authorized user-provided RSA 2048+ PFX/P12 certificate 
 - `dist/app.mjs`: UI, editing, page rendering and export orchestration.
 - `dist/native-export.mjs`: native PDF text replacement and signature protection.
 - `dist/encrypt.mjs`: standalone AES-256 PDF encryption with optional JSON-based native Info/XMP replacement.
+- `dist/decrypt.mjs`: browser-only decryption of password-protected PDFs with bundled qpdf/WASM.
+- `dist/vendor/qpdf/`: qpdf 11.0.0 WebAssembly runtime and Apache-2.0 license.
 - `dist/positioning.mjs`: axis-lock helpers.
 - `dist/metadata.mjs`: source metadata report, Info/XMP replacement or preservation, and optional provenance attachment.
 - `dist/font-identity.mjs`: Arial/Helvetica family, style and subset-name recognition.
 - `dist/font-coverage.mjs`: embedded-font character coverage, missing-glyph reporting and mixed font-run selection for canvas previews.
 - `dist/signing.mjs`: PFX/P12 handling, signed-copy creation and fingerprints.
-- `dist/vendor/`: bundled PDF.js, pdf-lib, fontkit, Forge and supporting assets, plus `pdf-encrypt/` (@pdfsmaller/pdf-encrypt 1.2.0, MIT) for AES-256 PDF security.
+- `dist/vendor/`: bundled PDF.js, pdf-lib, fontkit, Forge and supporting assets, plus `pdf-encrypt/` (@pdfsmaller/pdf-encrypt 1.2.0, MIT) for AES-256 PDF security and `qpdf/` (qpdf 11.0.0, Apache-2.0) for in-browser decryption.
 
 Third-party assets retain their bundled notices/licenses. This repository does not include user PDFs, credentials, signing certificates, temporary test keys, or hosting authentication.
