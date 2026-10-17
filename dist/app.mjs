@@ -1,5 +1,5 @@
 import {detectFontIdentity} from './font-identity.mjs';
-import {originalFontCoverage, glyphMapEncode, describeMissing, lineFontRuns} from './font-coverage.mjs';
+import {originalFontCoverage, glyphMapEncode, describeMissing, lineFontRuns, parsedHasGlyph} from './font-coverage.mjs';
 import {translatePosition, constrainPosition} from './positioning.mjs';
 import {readCertificate, signPdfCopy, fingerprints} from './signing.mjs';
 import {makeSourceMetadataRecord, metadataJson, parseUploadedMetadata, MAX_USER_METADATA_BYTES} from './metadata.mjs';
