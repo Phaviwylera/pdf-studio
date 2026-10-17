@@ -1,6 +1,6 @@
 # PDF Studio
 
-Browser-local PDF text editing with continuous scrolling, native-text export, fixed-decimal alignment, per-text X/Y position locks, SHA-256/SHA-512 fingerprints, and authorized RSA PFX/P12 signing.
+Browser-local PDF text editing with continuous scrolling, native-text export, source metadata inspection and optional replacement, fixed-decimal alignment, per-text X/Y position locks, SHA-256/SHA-512 fingerprints, and authorized RSA PFX/P12 signing.
 
 Live app: https://pdf-studio.phavithiranofficial.chatgpt.site
 
@@ -20,7 +20,17 @@ Open http://127.0.0.1:8765/. Do not open index.html directly: JavaScript modules
 
 Click text to type in place. Enter commits; Shift+Enter inserts a line; Escape cancels. Drag the move handle or use arrow keys. Alignment, Apply changes, exact coordinates, Lock X anchor, and Lock Y baseline are together in the sticky inspector header. Position locks are per text block, last for the current open document session, and are not embedded as PDF permissions.
 
-No-change downloads preserve the original bytes. Native exports preserve selectable edited text and existing artwork where the source structure supports safe replacement. Font matching and replacement are not universal; review exported documents.
+No-change downloads preserve the original bytes unless a metadata replacement JSON is selected. Native exports preserve selectable edited text and existing artwork where the source structure supports safe replacement. Font matching and replacement are not universal; review exported documents.
+
+## Source metadata
+
+After opening a PDF, click **Metadata** to inspect and download a JSON record of its native PDF Info fields (including custom fields) and XMP XML, when available. Calculated PDF.js document properties are not shown as Info metadata. Without a replacement upload, an edited native export preserves the source PDF's Info dictionary and XMP stream and embeds `pdf-studio-source-metadata.json` as a provenance attachment. An unchanged download remains byte-for-byte original.
+
+To **replace the PDF's native metadata**, choose a UTF-8 `.json` file (up to 8 MB) in the Metadata dialog. You can use the JSON downloaded from this app, a flat object such as `{"Title":"New title","Author":"Name","Custom":{"Project":"123"}}`, or `{"info":{"Title":"New title"},"xmp":{"raw":"<x:xmpmeta ...>...</x:xmpmeta>"}}` with valid XMP XML. The supplied Info fields replace the entire old document Info dictionary; fields not included are removed. The supplied `xmp.raw` replaces the catalog XMP stream; if absent, that XMP entry is removed. This is not secure redaction of old values copied elsewhere in the PDF (such as page-level metadata or existing attachments). Standard text fields, PDF dates, Trapped, and scalar custom Info fields are supported. PDF.js-derived properties (page count, PDF version, encryption, signatures, etc.) are not writable metadata; they are ignored in an app-generated report or rejected in other files. Unsupported values are rejected rather than silently inserted. The source provenance attachment and uploaded JSON are **not** newly attached when overriding metadata.
+
+The replacement is kept in browser memory for the current document, can be removed before export, and is cleared when another PDF opens. Even with no text edits, replacing metadata rewrites the PDF and changes its size and hashes. This is descriptive metadata, **not** a digital signature or proof of issuer identity. Signed, encrypted, or uninspectable PDFs remain view-only and cannot be rewritten. This step does not add decryption/re-encryption or certificate extraction.
+
+Run the metadata/export regression tests with `node --test tests/*.test.mjs` (Node.js required only for tests).
 
 ## Protection and signing
 
@@ -33,6 +43,7 @@ New signed copies use an authorized user-provided RSA 2048+ PFX/P12 certificate 
 - `dist/app.mjs`: UI, editing, page rendering and export orchestration.
 - `dist/native-export.mjs`: native PDF text replacement and signature protection.
 - `dist/positioning.mjs`: axis-lock helpers.
+- `dist/metadata.mjs`: source metadata report, Info/XMP replacement or preservation, and optional provenance attachment.
 - `dist/font-identity.mjs`: Arial/Helvetica family, style and subset-name recognition.
 - `dist/signing.mjs`: PFX/P12 handling, signed-copy creation and fingerprints.
 - `dist/vendor/`: bundled PDF.js, pdf-lib, fontkit, Forge and supporting assets.
