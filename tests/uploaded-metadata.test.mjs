@@ -69,7 +69,7 @@ test('bad or unsupported replacement metadata is rejected before export', () => 
  assert.throws(() => parseUploadedMetadata(Uint8Array.of(0xff), 'bad.json'), /UTF-8 JSON object/);
  assert.throws(() => upload('[]'), /UTF-8 JSON object/);
  assert.throws(() => upload('{bad}'), /UTF-8 JSON object/);
- assert.throws(() => upload('{"info":{"Title":17}}'), /Title must be text/);
+ assert.throws(() => upload('{"info":{"Title":17}}'), /"info\.Title" must be text or a list of names; received a number/);
  assert.throws(() => upload('{"info":{"Custom":{"Nested":{"bad":1}}}}'), /must be text/);
  assert.throws(() => upload('{"info":{},"extra":"ignored"}'), /Unsupported metadata field/);
  assert.throws(() => upload('{"PDFFormatVersion":"1.7"}'), /structure property/);
@@ -77,7 +77,22 @@ test('bad or unsupported replacement metadata is rejected before export', () => 
  assert.throws(() => upload('{"xmp":"not XML"}'), /must be XML/);
  assert.throws(() => upload('{"xmp":"<!DOCTYPE x><x/>"}'), /document type/);
  assert.throws(() => upload('{"Title":"A","title":"B"}'), /Duplicate PDF Info/);
+ assert.throws(() => upload('{"info":{"Custom":{"Profile":{"id":7,"name":"A"}}}}'), /"info\.Custom\.Profile" must be text, a number, a boolean or a PDF name.*received an object with keys "id", "name"/);
+ assert.throws(() => upload('{"file":{"name":{"nested":1}}}'), /"file\.name" must be text, a number, a boolean or a PDF name.*received an object/);
+ assert.throws(() => upload('{"info":{"Bad":{"a":1},"Worse":[1,2]}}'), /"info\.Bad".*"info\.Worse".*2 more PDF Info fields are unsupported|"info\.Bad".*"info\.Worse"/);
+ const error = (() => { try { upload('{"info":{"Title":17}}'); } catch (e) { return e; } })();
+ assert.equal(error.metadataError, true);
  assert.throws(() => parseUploadedMetadata(new Uint8Array(MAX_USER_METADATA_BYTES + 1), 'large.json'), /8 MB/);
+});
+
+test('lists of names are joined for standard text fields and unsupported lists are rejected', () => {
+ const parsed = upload('{"Keywords":["one","two"],"Author":["Ada","Grace"],"Subject":[]}');
+ assert.deepEqual(parsed.fields, [
+  {key: 'Keywords', type: 'text', value: 'one, two'},
+  {key: 'Author', type: 'text', value: 'Ada, Grace'},
+  {key: 'Subject', type: 'text', value: ''},
+ ]);
+ assert.throws(() => upload('{"Custom":{"Tags":["a","b"]}}'), /"Custom\.Tags" must be text, a number, a boolean or a PDF name.*received an array of 2 items/);
 });
 
 test('metadata-only export replaces Info completely, removes omitted fields and XMP, and adds no attachment', async () => {
@@ -169,4 +184,57 @@ test('replacement metadata cannot bypass signed-PDF protection', async () => {
  const original = await pdf.save();
  await assert.rejects(exportNativePdf({original, edits: new Map(), PDFLib: L, uploadedMetadata: upload('{"Title":"New"}')}), /Signature protection/);
  assert.deepEqual(await exportNativePdf({original, edits: new Map(), PDFLib: L}), original);
+});
+
+// Shape of a typical downloader sidecar: source file details plus PDF properties.
+const sidecar = {
+ file: {
+  name: '62271XXXX_DownloadStatement_1792215212.pdf',
+  sizeBytes: 583255,
+  hashes: {
+   'SHA-1': 'e0cd0b32f7b3d19faac9055724e63d4344bc84b4',
+   'SHA-256': '5ed8fb71a4dbbf699ffc40f1b2f27a250dd4fe02c0dfed1dd00b00b929ebde21',
+  },
+ },
+ metadata: {
+  version: '1.4', pages: 15, encrypted: true, Producer: 'openhtmltopdf.com',
+  CreationDate: "D:20261017110332+05'30'", decrypted: true,
+ },
+};
+
+test('sidecar file reports become native Info fields plus Source custom fields', () => {
+ const parsed = upload(JSON.stringify(sidecar));
+ assert.equal(parsed.format, 'sidecar');
+ assert.deepEqual(parsed.fields, [
+  {key: 'SourcePDFVersion', type: 'string', value: '1.4'},
+  {key: 'SourcePageCount', type: 'number', value: 15},
+  {key: 'SourceEncrypted', type: 'boolean', value: true},
+  {key: 'Producer', type: 'text', value: 'openhtmltopdf.com'},
+  {key: 'CreationDate', type: 'date', value: "D:20261017110332+05'30'"},
+  {key: 'SourceDecrypted', type: 'boolean', value: true},
+  {key: 'SourceFilename', type: 'string', value: '62271XXXX_DownloadStatement_1792215212.pdf'},
+  {key: 'SourceFileSizeBytes', type: 'number', value: 583255},
+  {key: 'SourceSHA1', type: 'string', value: 'e0cd0b32f7b3d19faac9055724e63d4344bc84b4'},
+  {key: 'SourceSHA256', type: 'string', value: '5ed8fb71a4dbbf699ffc40f1b2f27a250dd4fe02c0dfed1dd00b00b929ebde21'},
+ ]);
+ assert.equal(parsed.xmpRaw, null);
+});
+
+test('sidecar values are written to the exported PDF Info without an attachment', async () => {
+ const original = await source();
+ const out = await exportNativePdf({original, edits: new Map(), PDFLib: L, metadataRecord: {must: 'not attach'}, uploadedMetadata: upload(JSON.stringify(sidecar))});
+ const pdf = await L.PDFDocument.load(out, {updateMetadata: false});
+ assert.equal(pdf.getProducer(), 'openhtmltopdf.com');
+ assert.equal(infoEntries(pdf)['/SourcePageCount'], '15');
+ assert.equal(infoEntries(pdf)['/SourceEncrypted'], 'true');
+ assert.equal(infoEntries(pdf)['/SourceFilename'], L.PDFHexString.fromText(sidecar.file.name).toString());
+ assert.equal(infoEntries(pdf)['/SourceSHA256'], L.PDFHexString.fromText(sidecar.file.hashes['SHA-256']).toString());
+ assert.equal(pdf.catalog.get(key('Names')), undefined);
+ assert.equal(xmpXml(pdf), null);
+});
+
+test('sidecar reports reject nested source file values with a precise field name', () => {
+ assert.throws(() => upload('{"file":{"name":"a.pdf","hashes":{"SHA-256":{"hex":"x"}}}}'), /"file\.hashes\.SHA-256" must be text/);
+ assert.throws(() => upload('{"file":{"name":"a.pdf","extra":{"nested":1}}}'), /"file\.extra" must be text, a number, a boolean or a PDF name/);
+ assert.throws(() => upload('{"metadata":{"Profile":{"id":7}}}'), /"metadata\.Profile" must be text, a number, a boolean or a PDF name/);
 });
