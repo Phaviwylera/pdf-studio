@@ -1,6 +1,6 @@
 # PDF Studio
 
-Browser-local PDF text editing with continuous scrolling, native-text export, source metadata inspection and optional replacement, standalone AES-256 PDF encryption with an optional embedded native-metadata JSON report, fixed-decimal alignment, per-text X/Y position locks, SHA-256/SHA-512 fingerprints, and authorized RSA PFX/P12 signing.
+Browser-local PDF text editing with continuous scrolling, native-text export, source metadata inspection and optional replacement, standalone AES-256 PDF encryption with optional JSON-based native metadata replacement, fixed-decimal alignment, per-text X/Y position locks, SHA-256/SHA-512 fingerprints, and authorized RSA PFX/P12 signing.
 
 Live app: https://pdf-studio.phavithiranofficial.chatgpt.site
 
@@ -28,13 +28,13 @@ After opening a PDF, click **Metadata** to inspect and download a JSON record of
 
 To **replace the PDF's native metadata**, choose a UTF-8 `.json` file (up to 8 MB) in the Metadata dialog. You can use the JSON downloaded from this app, a flat object such as `{"Title":"New title","Author":"Name","Custom":{"Project":"123"}}`, or `{"info":{"Title":"New title"},"xmp":{"raw":"<x:xmpmeta ...>...</x:xmpmeta>"}}` with valid XMP XML. The supplied Info fields replace the entire old document Info dictionary; fields not included are removed. The supplied `xmp.raw` replaces the catalog XMP stream; if absent, that XMP entry is removed. This is not secure redaction of old values copied elsewhere in the PDF (such as page-level metadata or existing attachments). Standard text fields, PDF dates, Trapped, and scalar custom Info fields are supported. PDF.js-derived properties (page count, PDF version, encryption, signatures, etc.) are not writable metadata; they are ignored in an app-generated report or rejected in other files. Unsupported values are rejected rather than silently inserted. The source provenance attachment and uploaded JSON are **not** newly attached when overriding metadata.
 
-The replacement is kept in browser memory for the current document, can be removed before export, and is cleared when another PDF opens. Even with no text edits, replacing metadata rewrites the PDF and changes its size and hashes. This is descriptive metadata, **not** a digital signature or proof of issuer identity. Signed, encrypted, or uninspectable PDFs remain view-only in the editor. This metadata-replacement flow does not decrypt PDFs or extract certificates.
+After a successful upload, the Metadata dialog keeps the selected filename visible and confirms that the replacement is loaded for export. The replacement is kept in browser memory for the current document, can be removed before export, and is cleared when another PDF opens. Even with no text edits, replacing metadata rewrites the PDF and changes its size and hashes. This is descriptive metadata, **not** a digital signature or proof of issuer identity. Signed, encrypted, or uninspectable PDFs remain view-only in the editor. This metadata-replacement flow does not decrypt PDFs or extract certificates.
 
 ## Encrypt a PDF
 
 Use **Encrypt PDF** for a standalone password-protection flow; it does not depend on which document is open in the editor. Choose an unencrypted PDF, enter and confirm an open password (at least 8 characters), and optionally set a separate owner password. The tool creates a PDF-standard AES-256 encrypted copy locally in the browser. Use HTTPS or localhost; the original file is not changed. Already-encrypted and digitally signed PDFs are refused rather than rewritten.
 
-The **Embed native metadata** option is selected by default. It adds `pdf-studio-source-metadata.json` as an embedded PDF file, containing the source document's native Info/XMP metadata and basic source details. That attachment is added before encryption and is therefore password-protected; the Info dictionary and XMP metadata also remain in their native PDF locations. Uncheck the option to omit the JSON attachment while retaining native PDF metadata. Passwords are used only for this operation, are not stored or sent, and cannot be recovered if lost. PDF permission flags are not used as a substitute for the open password.
+Optionally choose a UTF-8 `.json` metadata file (up to 8 MB) to **replace the PDF's native Info/XMP metadata** before encryption. The dialog accepts the metadata JSON downloaded from this app, a flat object such as `{"Title":"New title","Author":"Name","Custom":{"Project":"123"}}`, or `{"info":{"Title":"New title"},"xmp":{"raw":"<x:xmpmeta ...>...</x:xmpmeta>"}}` with valid XMP XML. When supplied, only the JSON's Info fields become the PDF's Info dictionary; fields not included are removed, and missing XMP is removed. The JSON file itself is **not** attached to the encrypted PDF. Leave the file empty to retain the source PDF's existing native Info/XMP metadata unchanged. Standard text fields, PDF dates, Trapped, and scalar custom Info fields are supported; PDF structure properties (page count, PDF version, encryption, signatures, etc.) cannot be set from JSON. This is descriptive metadata, not secure redaction of values copied elsewhere in the PDF, and it is not a digital signature. Passwords are used only for this operation, are not stored or sent, and cannot be recovered if lost. PDF permission flags are not used as a substitute for the open password.
 
 Run metadata, export, and encryption regression tests with `node --test tests/*.test.mjs` (Node.js required only for tests).
 
@@ -48,7 +48,7 @@ New signed copies use an authorized user-provided RSA 2048+ PFX/P12 certificate 
 
 - `dist/app.mjs`: UI, editing, page rendering and export orchestration.
 - `dist/native-export.mjs`: native PDF text replacement and signature protection.
-- `dist/encrypt.mjs`: standalone AES-256 PDF encryption and optional embedded native-metadata report.
+- `dist/encrypt.mjs`: standalone AES-256 PDF encryption with optional JSON-based native Info/XMP replacement.
 - `dist/positioning.mjs`: axis-lock helpers.
 - `dist/metadata.mjs`: source metadata report, Info/XMP replacement or preservation, and optional provenance attachment.
 - `dist/font-identity.mjs`: Arial/Helvetica family, style and subset-name recognition.
