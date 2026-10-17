@@ -84,6 +84,10 @@ test('AES-256 encryption applies downloaded report Info/XMP and never attaches t
   assert.match(decode(encrypted), /\/Encrypt/);
   assert.match(decode(encrypted), /\/AESV3/);
   await assert.rejects(L.PDFDocument.load(encrypted), /encrypted/);
+  const encryptedPdf = await L.PDFDocument.load(encrypted, {ignoreEncryption: true, updateMetadata: false});
+  assert.deepEqual(Object.keys(infoEntries(encryptedPdf)).sort(), ['/Project', '/Title']);
+  assert.notEqual(encryptedPdf.catalog.get(key('Metadata')), undefined);
+  assert.equal(encryptedPdf.catalog.get(key('Names')), undefined);
  } finally {
   L.PDFDocument.prototype.attach = originalAttach;
  }
@@ -138,6 +142,10 @@ test('without a metadata JSON the source bytes retain all native Info/XMP for en
  assert.equal(infoEntries(pdf)['/OriginalCustom'], L.PDFHexString.fromText('original value').toString());
  assert.match(xmpXml(pdf), /Native XMP/);
  assert.match(decode(encrypted), /\/Encrypt/);
+ const encryptedPdf = await L.PDFDocument.load(encrypted, {ignoreEncryption: true, updateMetadata: false});
+ const keys = Object.keys(infoEntries(encryptedPdf));
+ for (const field of ['/Title', '/Author', '/Producer', '/OriginalCustom']) assert.ok(keys.includes(field), `${field} is retained in the encrypted PDF`);
+ assert.notEqual(encryptedPdf.catalog.get(key('Metadata')), undefined);
 });
 
 test('invalid metadata JSON is rejected before encryption', async () => {
