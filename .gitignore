@@ -1,0 +1,12 @@
+node_modules/
+.env
+.env.*
+*.pfx
+*.p12
+*.pem
+*.key
+*.pdf
+uploads/
+tmp/
+.DS_Store
+Thumbs.db
