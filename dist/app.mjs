@@ -12,6 +12,7 @@ import {normalizeMeasure, formatMeasure, textPaintMode, canvasStrokeWidth, glyph
 import {matchTextOperations} from './text-matching.mjs';
 import {buildDocumentFontInventory, fontKey, formatFontInventory} from './font-inventory.mjs';
 import {readPdfFileId, sameFileId, fileIdWarning, enforceFileId} from './file-id.mjs';
+import {extractStatementRows, checkStatement, formatReport} from './statement-check.mjs';
 pdfjs.GlobalWorkerOptions.workerSrc='./vendor/pdf.worker.mjs';
 const $=id=>document.getElementById(id), OPS=pdfjs.OPS;
 let doc=null, original=null, uploadedOriginal=null, pageNo=1, filename='', selected=null, cache=new Map(), edits=new Map(), history=[], future=[], busy=false, fontCounter=0;
@@ -47,7 +48,7 @@ function repaintAllLoaded(){for(const view of pageViews.values())if(view.rendere
 function notice(message){$('toast').textContent=message;$('toast').hidden=false;clearTimeout(notice.timer);notice.timer=setTimeout(()=>$('toast').hidden=true,6500)}
 function status(message){$('status').textContent=message}
 function setBusy(value){busy=value;document.body.classList.toggle('busy',value);$('loading').hidden=!value;sync();$('encrypt').disabled=value}
-function sync(){$('matchfont').disabled=signatureState.locked||busy||!currentBlock()||!(currentBlock().canEdit||currentBlock().added);$('sign').disabled=!doc||busy||metadataLoading||signatureState.locked;$('metadata').disabled=!doc||busy||metadataLoading;$('metadata-file').disabled=!doc||busy||metadataLoading||signatureState.locked;$('metadata-remove').disabled=!doc||busy||metadataLoading||signatureState.locked||!uploadedMetadata;$('hashes').disabled=!doc||busy||metadataLoading;$('fileid').disabled=!doc||busy||metadataLoading;$('fontid').disabled=!doc||busy||metadataLoading;$('apply').disabled=signatureState.locked||busy||!currentBlock()||!(currentBlock().canEdit||currentBlock().added);$('align').disabled=$('apply').disabled;syncPositionLocks();$('export').disabled=!doc||busy||metadataLoading;$('add').disabled=!doc||busy||signatureState.locked;$('export').textContent=signatureState.locked?'Download original':'Export PDF';$('signaturestatus').hidden=!doc;$('signaturestatus').textContent=signatureState.unknown?'Inspection unavailable · view only':signatureState.locked?'Signature protected · view only':'Signature protection on';$('signature-message').hidden=!signatureState.locked;$('signature-message').textContent=signatureProtectionMessage();$('prev').disabled=!doc||pageNo<=1||busy;$('next').disabled=!doc||pageNo>=doc.numPages||busy;$('undo').disabled=!history.length||busy;$('redo').disabled=!future.length||busy;$('dirty').hidden=!(edits.size||uploadedMetadata);$('dirty').textContent=edits.size?'Unsaved changes':'Metadata replacement ready';$('pageinfo').textContent=doc?`${pageNo} / ${doc.numPages}`:'— / —';for(const b of $('pages').querySelectorAll('button')){b.classList.toggle('active',Number(b.dataset.page)===pageNo);b.querySelector('span').textContent=[...edits.values()].some(e=>e.page===Number(b.dataset.page))?'Edited':''}}
+function sync(){$('matchfont').disabled=signatureState.locked||busy||!currentBlock()||!(currentBlock().canEdit||currentBlock().added);$('sign').disabled=!doc||busy||metadataLoading||signatureState.locked;$('metadata').disabled=!doc||busy||metadataLoading;$('metadata-file').disabled=!doc||busy||metadataLoading||signatureState.locked;$('metadata-remove').disabled=!doc||busy||metadataLoading||signatureState.locked||!uploadedMetadata;$('hashes').disabled=!doc||busy||metadataLoading;$('fileid').disabled=!doc||busy||metadataLoading;$('fontid').disabled=!doc||busy||metadataLoading;$('statement').disabled=!doc||busy||metadataLoading;$('apply').disabled=signatureState.locked||busy||!currentBlock()||!(currentBlock().canEdit||currentBlock().added);$('align').disabled=$('apply').disabled;syncPositionLocks();$('export').disabled=!doc||busy||metadataLoading;$('add').disabled=!doc||busy||signatureState.locked;$('export').textContent=signatureState.locked?'Download original':'Export PDF';$('signaturestatus').hidden=!doc;$('signaturestatus').textContent=signatureState.unknown?'Inspection unavailable · view only':signatureState.locked?'Signature protected · view only':'Signature protection on';$('signature-message').hidden=!signatureState.locked;$('signature-message').textContent=signatureProtectionMessage();$('prev').disabled=!doc||pageNo<=1||busy;$('next').disabled=!doc||pageNo>=doc.numPages||busy;$('undo').disabled=!history.length||busy;$('redo').disabled=!future.length||busy;$('dirty').hidden=!(edits.size||uploadedMetadata);$('dirty').textContent=edits.size?'Unsaved changes':'Metadata replacement ready';$('pageinfo').textContent=doc?`${pageNo} / ${doc.numPages}`:'— / —';for(const b of $('pages').querySelectorAll('button')){b.classList.toggle('active',Number(b.dataset.page)===pageNo);b.querySelector('span').textContent=[...edits.values()].some(e=>e.page===Number(b.dataset.page))?'Edited':''}}
 const norm=s=>(s||'').normalize('NFKC').replace(/\s/g,'');
 function infer(name,metadata={}){const n=String(name||'').replace(/^[A-Z]{6}\+/,'').replace(/[_,-]+/g,' '),mono=metadata.isMonospace||metadata.monospace||/courier|mono|consolas|menlo|typewriter/i.test(n),sans=/sans|arial|helvetica|calibri|carlito|roboto|segoe|tahoma|verdana|lato|gothic|inter(?:\s|$)/i.test(n),serif=!sans&&/times|serif|roman|garamond|cambria|caladea|baskerville|palatino|georgia|bookman|century/i.test(n);return {font:mono?'Courier New':serif?'Times New Roman':'Arial',bold:!!(metadata.bold||metadata.black)||/bold|black|heavy|demi|semibold/i.test(n),italic:!!metadata.italic||/italic|oblique|slanted/i.test(n)}}
 function fontFamilyKey(name){return String(name||'').replace(/^[A-Z]{6}\+/,'').replace(/[^a-z0-9]/ig,'').toLowerCase().replace(/(?:(?:semibold|demibold|bold|italic|oblique|regular|roman|medium|light|heavy|black|thin|book|normal|psmt|mt))+$/g,'');}
@@ -483,7 +484,7 @@ $('export-close').onclick=()=>{if(!busy)closeExportDialog()};$('export-cancel').
 $('export-dialog').addEventListener('cancel',event=>{if(busy)event.preventDefault();else closeExportDialog()});
 $('export-dialog').addEventListener('close',()=>{if(!busy)clearExportForm()});
 $('export-mode-standard').onchange=syncExportMode;$('export-mode-encrypted').onchange=syncExportMode;
-$('fontid').onclick=openFontDialog;$('fontid-close').onclick=()=>$('fontid-dialog').close();$('fontid-dialog').addEventListener('cancel',event=>{if(busy)event.preventDefault()});$('fontid-clear').onclick=()=>{if(!documentFontOptions.length||busy)return;const first=documentFontOptions[0];selectDocumentFont(first.family);$('fontid-dialog').close()};$('fileid').onclick=openFileIdDialog;$('fileid-close').onclick=()=>$('fileid-dialog').close();$('fileid-dialog').addEventListener('cancel',event=>{if(busy)event.preventDefault()});$('fileid-file').onchange=()=>selectFileIdSource($('fileid-file').files[0]);$('fileid-clear').onclick=clearRestoredFileId;
+$('statement').onclick=openStatementCheck;$('statement-close').onclick=()=>$('statement-dialog').close();$('statement-dialog').addEventListener('cancel',event=>{if(busy)event.preventDefault()});$('statement-refresh').onclick=openStatementCheck;$('statement-apply').onclick=applyStatementFixes;$('fontid').onclick=openFontDialog;$('fontid-close').onclick=()=>$('fontid-dialog').close();$('fontid-dialog').addEventListener('cancel',event=>{if(busy)event.preventDefault()});$('fontid-clear').onclick=()=>{if(!documentFontOptions.length||busy)return;const first=documentFontOptions[0];selectDocumentFont(first.family);$('fontid-dialog').close()};$('fileid').onclick=openFileIdDialog;$('fileid-close').onclick=()=>$('fileid-dialog').close();$('fileid-dialog').addEventListener('cancel',event=>{if(busy)event.preventDefault()});$('fileid-file').onchange=()=>selectFileIdSource($('fileid-file').files[0]);$('fileid-clear').onclick=clearRestoredFileId;
 $('metadata').onclick=()=>{if(!doc||busy||!sourceMetadata)return;$('metadata-info').textContent=metadataJson(sourceMetadata);metadataUploadStatus();$('metadata-dialog').showModal();};$('metadata-close').onclick=()=>$('metadata-dialog').close();$('metadata-download').onclick=()=>{if(!sourceMetadata)return;download(new Blob([metadataJson(sourceMetadata)],{type:'application/json'}),'pdf-studio-source-metadata.json');status('Source metadata JSON downloaded');};$('metadata-file').onchange=()=>selectMetadataUpload($('metadata-file').files[0]);$('metadata-remove').onclick=()=>{if(!uploadedMetadata||busy||metadataLoading)return;metadataReadVersion++;uploadedMetadata=null;$('metadata-file').value='';invalidateCurrentExportFingerprint();metadataUploadStatus();sync();status('Metadata replacement removed from the next export');};
 $('sign').onclick=()=>{if(doc&&!busy&&!signatureState.locked){clearSigning();$('sign-dialog').showModal();}};$('sign-close').onclick=()=>{clearSigning();$('sign-dialog').close();};$('sign-dialog').addEventListener('cancel',e=>{if(busy)e.preventDefault();else clearSigning();});$('sign-dialog').addEventListener('close',()=>{if(!busy)clearSigning();});$('p12-inspect').onclick=inspectP12;$('p12-file').onchange=()=>{certificateReadVersion++;signingCredential=null;$('p12-sign').disabled=true;$('p12-authorized').checked=false;$('p12-info').textContent='Read the selected certificate to inspect its identity.';};$('p12-authorized').onchange=()=>{$('p12-sign').disabled=!signingCredential||!$('p12-authorized').checked;};$('p12-sign').onclick=downloadSignedCopy;$('hashes').onclick=()=>{if(!doc||busy)return;$('hash-dialog').showModal();};$('hash-close').onclick=()=>$('hash-dialog').close();$('hash-original').onclick=()=>calculateFingerprints(false);$('hash-current').onclick=()=>calculateFingerprints(true);$('hash-pdf-download').onclick=()=>{if(fingerprintedPdf)download(fingerprintedPdf.blob,fingerprintedPdf.name);};$('hash-download').onclick=()=>{if(hashRecord)download(new Blob([JSON.stringify(hashRecord,null,2)],{type:'application/json'}),'pdf-fingerprints.json');};
 const downloadUrls=new Map();
@@ -509,5 +510,81 @@ async function loadFont(file){if(!file)return;try{if(!/\.(ttf|otf)$/i.test(file.
 async function practice(){const p=await PDFLib.PDFDocument.create();const page=p.addPage([595.28,841.89]);const font=await p.embedFont(PDFLib.StandardFonts.Helvetica),bold=await p.embedFont(PDFLib.StandardFonts.HelveticaBold),italic=await p.embedFont(PDFLib.StandardFonts.HelveticaOblique);page.drawText('PRACTICE',{x:160,y:430,size:64,font:bold,color:PDFLib.rgb(.75,.82,.95),rotate:PDFLib.degrees(35),opacity:.45});page.drawText('DESIGN STUDIO',{x:54,y:775,size:20,font:bold,color:PDFLib.rgb(.1,.22,.48)});page.drawText('A document for practicing text edits',{x:54,y:747,size:12,font:italic,color:PDFLib.rgb(.4,.45,.55)});page.drawLine({start:{x:54,y:727},end:{x:540,y:727},thickness:1,color:PDFLib.rgb(.8,.85,.92)});page.drawText('Typography & alignment',{x:54,y:679,size:16,font:bold});page.drawText('Select any line to change its font, size, spacing or color.',{x:54,y:651,size:12,font});page.drawText('Change the amount below and choose Fixed decimal point.',{x:54,y:626,size:12,font});page.drawText('The original artwork stays behind the replacement text.',{x:54,y:601,size:12,font});page.drawText('Amount',{x:54,y:510,size:12,font:bold});page.drawText('1234.56',{x:410,y:510,size:16,font});page.drawText('0123456789',{x:54,y:460,size:12,font});page.drawText('Header, body and footer text can all be selected.',{x:54,y:367,size:12,font});page.drawLine({start:{x:54,y:85},end:{x:540,y:85},thickness:1,color:PDFLib.rgb(.8,.85,.92)});page.drawText('Practice document | Page 1',{x:54,y:60,size:10,font,color:PDFLib.rgb(.4,.45,.55)});const second=p.addPage([595.28,841.89]);second.drawText('Second page',{x:54,y:775,size:20,font:bold});second.drawText('Untouched pages retain their original PDF structure.',{x:54,y:733,size:12,font});const bytes=await p.save();await openFile(new File([bytes],'practice.pdf',{type:'application/pdf'}))}
 $('matchfont').onclick=chooseBestFont;$('open').onclick=$('emptyopen').onclick=()=>{if(!busy)$('file').click()};$('file').onchange=()=>openFile($('file').files[0]);$('sample').onclick=practice;$('zoom').onchange=refreshDocumentZoom;$('prev').onclick=()=>navigate(pageNo-1);$('next').onclick=()=>navigate(pageNo+1);$('add').onclick=add;$('apply').onclick=()=>{if(inline)finishInline();else apply()};$('undo').onclick=undo;$('redo').onclick=redo;$('export').onclick=openExportOptions;$('loadfont').onclick=()=>$('fontfile').click();$('fontfile').onchange=()=>loadFont($('fontfile').files[0]);$('controls').onsubmit=e=>{e.preventDefault();apply()};$('align').onchange=()=>{const b=currentBlock();if(!b)return;const previous=b.align,next=$('align').value;$('decimalhelp').hidden=next!=='decimal';if(next==='decimal'&&previous!=='decimal'&&!positionLocks.get(b.id)?.x){const ctx=canvasForPage(b.page).getContext('2d');const line=b.text.split('\n')[0],i=line.indexOf('.'),prefix=i<0?line:line.slice(0,i),gap=((b.spacing||0)+(prefix.endsWith(' ')?(b.wordSpacing||0):0))*b.scaleX;$('x').value=formatMeasure(textStart(ctx,b,line)+measure(ctx,b,prefix)+(i>0?gap:0))}};$('reset').onclick=()=>{if(!selected)return;const id=selected;commit(()=>edits.delete(id));if(originalBlock(id))select(id);else{selected=null;$('controls').hidden=true;$('selectionhint').hidden=false}};$('delete').onclick=()=>{const b=currentBlock();if(!b||!(b.canEdit||b.added))return;commit(()=>b.added?edits.delete(b.id):edits.set(b.id,{...b,removed:true}));selected=null;$('controls').hidden=true;$('selectionhint').hidden=false};document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'&&!/INPUT|TEXTAREA/.test(e.target.tagName)){e.preventDefault();e.shiftKey?redo():undo()}});for(const event of ['dragenter','dragover'])$('drop').addEventListener(event,e=>{e.preventDefault();e.dataTransfer.dropEffect='copy'});$('drop').addEventListener('drop',e=>{e.preventDefault();const file=e.dataTransfer.files[0];if(file)openFile(file)});
 if(document.modelContext?.registerTool){try{document.modelContext.registerTool({name:'inspect_open_pdf',description:'Read the open PDF page and the selected text. Does not change or export the document.',inputSchema:{type:'object',properties:{},additionalProperties:false},annotations:{readOnlyHint:true,untrustedContentHint:true},execute:()=>({filename,page:pageNo,pages:doc?.numPages||0,changedRuns:edits.size,selection:currentBlock()?{text:currentBlock().text,font:currentBlock().fontName,size:currentBlock().size}:null})})}catch{}}
+// --- Statement arithmetic -------------------------------------------------
+// The check reads every page the same way the viewer does, applies the edits
+// already made, and reports where the numbers stop adding up.
+let statementReport=null, statementPages=null, statementChecking=false;
+async function statementPageData(){
+ const pages=[];
+ for(let n=1;n<=doc.numPages;n++){
+  $('statement-status').textContent=`Reading page ${n} of ${doc.numPages}…`;
+  let data;
+  try{data=await getPage(n)}catch{continue}
+  const originals=new Map(data.blocks.map(block=>[block.id,block]));
+  const blocks=data.blocks.map(block=>edits.get(block.id)||block).filter(block=>!block.removed);
+  for(const edit of edits.values())if(edit.page===n&&edit.added&&!edit.removed)blocks.push(edit);
+  pages.push({page:n,blocks,originals});
+ }
+ return pages;
+}
+function renderStatementReport(){
+ const report=statementReport;
+ if(!report)return;
+ $('statement-info').textContent=formatReport(report);
+ const fixes=report.fixes?.length||0;
+ $('statement-status').textContent=report.empty?'No transaction rows were found. Statement check needs a table with dates, amounts and a running balance.':fixes?`${fixes} balance cell${fixes===1?'':'s'} do not follow from the amounts. Review them, then use Fix balances.`:'Every row adds up. The statement is arithmetically consistent.';
+ $('statement-apply').disabled=!fixes||signatureState.locked||busy;
+ $('statement-apply').textContent=fixes?`Fix ${fixes} balance${fixes===1?'':'s'}`:'Balances already agree';
+ $('statement-refresh').disabled=!doc;
+}
+async function runStatementCheck(){
+ if(!doc)return null;
+ statementPages=await statementPageData();
+ const extracted=extractStatementRows(statementPages);
+ statementReport=checkStatement(extracted.rows);
+ statementReport.skipped=extracted.skipped.length;
+ renderStatementReport();
+ return statementReport;
+}
+async function openStatementCheck(){
+ if(!doc||busy||metadataLoading||statementChecking)return;
+ if(!$('statement-dialog').open)$('statement-dialog').showModal();
+ statementChecking=true;
+ $('statement-apply').disabled=true;$('statement-refresh').disabled=true;
+ $('statement-status').textContent='Reading the statement…';
+ try{await runStatementCheck()}
+ catch(error){statementReport=null;$('statement-info').textContent=error.message||'The statement could not be checked.';$('statement-status').textContent='The check stopped before it finished.'}
+ finally{statementChecking=false;$('statement-refresh').disabled=!doc;sync()}
+}
+// Rewrite only the balance cells that no longer follow from the amounts, in the
+// shape the document already uses, then re-check the whole statement.
+async function applyStatementFixes(){
+ const fixes=statementReport?.fixes||[];
+ if(!fixes.length||busy||statementChecking||signatureState.locked)return;
+ setBusy(true);
+ try{
+  const byPage=new Map();
+  for(const fix of fixes){if(!byPage.has(fix.page))byPage.set(fix.page,[]);byPage.get(fix.page).push(fix)}
+  const applied=[],missed=[];
+  let recorded=false;
+  for(const [page,list] of byPage){
+   const data=await getPage(page);
+   for(const fix of list){
+    const candidates=data.blocks.filter(block=>norm((edits.get(block.id)||block).text)===norm(fix.from));
+    candidates.sort((a,b)=>Math.hypot(a.x-fix.x,a.y-fix.y)-Math.hypot(b.x-fix.x,b.y-fix.y));
+    const target=candidates[0];
+    if(!target||!(target.canEdit||target.added)){missed.push(fix);continue}
+    if(!recorded){history.push(snapshot());if(history.length>60)history.shift();future=[];recorded=true}
+    edits.set(target.id,{...(edits.get(target.id)||target),text:fix.to});
+    applied.push(fix);
+   }
+  }
+  if(applied.length){invalidateCurrentExportFingerprint();for(const page of byPage.keys())schedulePaint(page,true)}
+  sync();
+  await runStatementCheck();
+  notice(missed.length?`${applied.length} balance cell${applied.length===1?'':'s'} updated; ${missed.length} could not be edited here. Undo restores the text.`:`${applied.length} balance cell${applied.length===1?'':'s'} updated. Undo restores the text.`);
+ }catch(error){notice(error.message||'The balances could not be updated.')}
+ finally{setBusy(false);sync()}
+}
 // Local test hook uses the same operations as the interface; no network or document persistence.
-window.pdfStudio={practice,getPage,select,apply,exportPdf,renderEdited,embeddedEncode,originalCoverageFor,fontRuns,translatedBlock,nudgeSelection,startInline,finishInline,pageAtReadingLine,setupDocumentViews,schedulePaint,loadDocumentFonts,documentFontForPage,selectDocumentFont,get state(){return {doc,edits,pageNo,cache,pageViews,signatureState,fontInventory,documentFontOptions,originalFonts}}};
+window.pdfStudio={practice,getPage,select,apply,exportPdf,renderEdited,embeddedEncode,originalCoverageFor,fontRuns,translatedBlock,nudgeSelection,startInline,finishInline,pageAtReadingLine,setupDocumentViews,schedulePaint,loadDocumentFonts,documentFontForPage,selectDocumentFont,openStatementCheck,applyStatementFixes,get statementReport(){return statementReport},get state(){return {doc,edits,pageNo,cache,pageViews,signatureState,fontInventory,documentFontOptions,originalFonts}}};
