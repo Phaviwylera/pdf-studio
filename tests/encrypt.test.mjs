@@ -215,3 +215,50 @@ test('sidebar-style file metadata JSON is applied to the encrypted PDF', async (
  assert.equal(infoEntries(encryptedPdf)['/SourceSHA256'], undefined, 'source descriptors are never written');
  assert.ok(Object.keys(infoEntries(encryptedPdf)).includes('/Producer'));
 });
+
+test('an RC4 128-bit copy writes the legacy security handler', async () => {
+ const source = await samplePdf();
+ const encrypted = await encryptPdfCopy({bytes: source, password: 'open sesame', ownerPassword: 'owner secret', PDFLib: L, algorithm: 'RC4-128'});
+ const pdf = await L.PDFDocument.load(encrypted, {ignoreEncryption: true});
+ const dict = pdf.context.lookup(pdf.context.trailerInfo.Encrypt, L.PDFDict);
+ assert.equal(dict.get(key('Filter')).toString(), '/Standard');
+ assert.equal(dict.get(key('V')).asNumber(), 2, 'V 2 is the RC4 handler');
+ assert.equal(dict.get(key('R')).asNumber(), 3, 'R 3 is the 128-bit revision');
+ assert.equal(dict.get(key('Length')).asNumber(), 128);
+ // Both values are 32 bytes (R 3), written as hex strings with their brackets.
+ assert.equal(dict.get(key('O')).toString().length, 66);
+ assert.equal(dict.get(key('U')).toString().length, 66);
+ // No AES-specific entries: /OE, /UE, /Perms and /CF belong to AES-256 only.
+ for (const name of ['OE', 'UE', 'Perms', 'CF', 'StmF', 'StrF']) assert.equal(dict.get(key(name)), undefined, `${name} is not part of RC4`);
+});
+
+test('an RC4 128-bit copy is unreadable without the password', async () => {
+ const source = await samplePdf();
+ const encrypted = await encryptPdfCopy({bytes: source, password: 'open sesame', PDFLib: L, algorithm: 'RC4-128'});
+ await assert.rejects(() => L.PDFDocument.load(encrypted), /encrypt|password/i);
+ // The page text is inside the encrypted streams, not sitting in the bytes.
+ assert.equal(decode(encrypted).includes('Private document'), false);
+});
+
+test('RC4 does not raise a document that already declares an older version', async () => {
+ const source = await samplePdf();
+ const lowered = await L.PDFDocument.load(source, {updateMetadata: false});
+ lowered.catalog.set(key('Version'), L.PDFName.of('1.4'));
+ const bytes = await lowered.save({useObjectStreams: false});
+ const rc4 = await encryptPdfCopy({bytes, password: 'open sesame', PDFLib: L, algorithm: 'RC4-128'});
+ const after = await L.PDFDocument.load(rc4, {ignoreEncryption: true});
+ assert.equal(after.catalog.get(key('Version'))?.toString(), '/1.4', 'RC4 128-bit is defined from 1.4 on');
+ // AES-256 still raises it, so the file never claims to be older than its encryption.
+ const aes = await encryptPdfCopy({bytes, password: 'open sesame', PDFLib: L});
+ const raised = await L.PDFDocument.load(aes, {ignoreEncryption: true});
+ assert.equal(raised.catalog.get(key('Version'))?.toString(), '/1.7');
+});
+
+test('the algorithm reaches the encryptor from the export path and is validated', async () => {
+ const calls = [];
+ const encrypt = async (bytes, password, options) => { calls.push(options.algorithm); return new Uint8Array([1, 2, 3]); };
+ await encryptPdfCopy({bytes: await samplePdf(), password: 'open sesame', PDFLib: L, algorithm: 'RC4-128', encrypt});
+ await encryptPdfCopy({bytes: await samplePdf(), password: 'open sesame', PDFLib: L, encrypt});
+ assert.deepEqual(calls, ['RC4', 'AES-256']);
+ await assert.rejects(() => encryptPdfCopy({bytes: new Uint8Array([1]), password: 'open sesame', PDFLib: L, algorithm: 'DES'}), /AES-256 or RC4 128-bit/);
+});

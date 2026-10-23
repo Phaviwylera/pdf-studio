@@ -2,7 +2,7 @@ import { encryptPDF } from './vendor/pdf-encrypt/index.mjs';
 import { applyUploadedMetadata, parseUploadedMetadata } from './metadata.mjs';
 import { signatureProtectionForDocument } from './native-export.mjs';
 import { applyFileId, sameFileId, fileIdFromDocument } from './file-id.mjs';
-import { ensureCatalogVersion, ensurePdfVersion, AES_256_MIN_VERSION } from './pdf-version.mjs';
+import { ensureCatalogVersion, ensurePdfVersion, AES_256_MIN_VERSION, RC4_128_MIN_VERSION } from './pdf-version.mjs';
 
 /**
  * Create an encrypted copy without changing the editor's currently open document.
@@ -23,10 +23,31 @@ export function randomOwnerPassword() {
   return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
 }
 
+/**
+ * The two encryption schemes this app can write. AES-256 is the default because
+ * it is the only one that is still considered safe; RC4 128-bit is offered for
+ * the files that still require it, typically an older bank or archive system
+ * that cannot open anything else. RC4 needs no Web Crypto, so it works in a
+ * plain http:// page too.
+ */
+export const ENCRYPTION_ALGORITHMS = ['AES-256', 'RC4-128'];
+export function encryptionLabel(algorithm) {
+ return algorithm === 'RC4-128' ? 'RC4 128-bit' : 'AES-256';
+}
+function normalizeAlgorithm(algorithm) {
+ if (algorithm === 'RC4' || algorithm === 'RC4-128' || algorithm === 'RC4 128-bit') return 'RC4-128';
+ if (algorithm === undefined || algorithm === null || algorithm === '' || algorithm === 'AES-256') return 'AES-256';
+ throw new Error('Unknown encryption algorithm. Choose AES-256 or RC4 128-bit.');
+}
+
 export async function encryptPdfCopy({
-  bytes, password, ownerPassword = '', metadataFile = null, fileId = null,
+  bytes, password, ownerPassword = '', metadataFile = null, fileId = null, algorithm = 'AES-256',
   PDFLib, onProgress = () => {}, encrypt = encryptPDF,
 }) {
+ const scheme = normalizeAlgorithm(algorithm);
+ const legacyRc4 = scheme === 'RC4-128';
+ const label = encryptionLabel(scheme);
+ const minVersion = legacyRc4 ? RC4_128_MIN_VERSION : AES_256_MIN_VERSION;
   if (!(bytes instanceof Uint8Array) || !bytes.length) throw new Error('Choose a PDF to encrypt.');
   if (typeof password !== 'string' || password.length < 8) throw new Error('Use an open password with at least 8 characters.');
   if (ownerPassword && ownerPassword.length < 8) throw new Error('The owner password must have at least 8 characters, or be left blank to use the open password.');
@@ -53,10 +74,10 @@ export async function encryptPdfCopy({
   if (signatureProtectionForDocument(source, PDFLib).locked) {
     throw new Error('This PDF contains a digital signature. Encrypting a rewritten copy would invalidate it, so signed PDFs are not modified.');
   }
-  // AES-256 (V5 / R5) exists from PDF 1.7 on. Raise a stale catalog /Version now
-  // so the saved, encrypted document never claims to be an older version than
-  // the encryption it carries.
-  ensureCatalogVersion(source, AES_256_MIN_VERSION, PDFLib);
+  // AES-256 (V5 / R5) exists from PDF 1.7 on; RC4 128-bit from 1.4. Raise a stale
+  // catalog /Version now so the saved, encrypted document never claims to be an
+  // older version than the encryption it carries. Nothing is ever lowered.
+  ensureCatalogVersion(source, minVersion, PDFLib);
 
   let output = bytes.slice();
   let restoreFileId = !!fileId && !sameFileId(fileId, fileIdFromDocument(source, PDFLib));
@@ -84,14 +105,14 @@ export async function encryptPdfCopy({
     }
   }
 
-  onProgress('Encrypting with AES-256…');
+  onProgress(`Encrypting with ${label}…`);
   // The opening password must not also be the owner password: otherwise anyone
   // who can open the file can silently lift its permission flags.
   const owner = ownerPassword || randomOwnerPassword();
   try {
     const encrypted = await encrypt(output, password, {
       ownerPassword: owner,
-      algorithm: 'AES-256',
+      algorithm: legacyRc4 ? 'RC4' : 'AES-256',
       // The exported copy is final. Permissions keep it printable, copyable and
       // accessible while forbidding the silent edits that mark a rewrite.
       allowPrinting: true,
@@ -104,12 +125,12 @@ export async function encryptPdfCopy({
       allowExtraction: true,
     });
     const bytes = encrypted instanceof Uint8Array ? encrypted : new Uint8Array(encrypted);
-    // pdf-lib writes a 1.7 header already; this covers bytes produced by any
-    // other encryptor, and keeps the header and the AES-256 payload in step.
-    return ensurePdfVersion({bytes, version: AES_256_MIN_VERSION});
+    // The header must not claim an older version than the encryption it carries;
+    // this covers bytes produced by any other encryptor and raises only.
+    return ensurePdfVersion({bytes, version: minVersion});
   } catch (error) {
     if (error?.name === 'AlreadyEncryptedError') throw new Error('This PDF is already encrypted. Unlock it before creating a new encrypted copy.');
-    if (/crypto|subtle|secure context/i.test(error?.message || '')) throw new Error('AES-256 encryption needs a secure browser context (HTTPS or localhost).');
+    if (!legacyRc4 && /crypto|subtle|secure context/i.test(error?.message || '')) throw new Error('AES-256 encryption needs a secure browser context (HTTPS or localhost). RC4 128-bit works without it.');
     throw new Error(error?.message || 'Could not encrypt this PDF.');
   }
 }

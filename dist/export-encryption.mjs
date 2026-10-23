@@ -33,10 +33,12 @@ export function encryptedExportName(name = 'document.pdf') {
 /**
  * Encrypt the bytes already produced by exportNativePdf. The native export is
  * created first, so edits and any selected metadata replacement are inside these
- * bytes; encryptPdfCopy then protects that exact document with AES-256.
+ * bytes; encryptPdfCopy then protects that exact document with the chosen
+ * algorithm (AES-256 by default, RC4 128-bit when the file must stay readable by
+ * an older system).
  */
 export async function encryptExportCopy({
- bytes, password, confirmation, ownerPassword = '', fileId = null,
+ bytes, password, confirmation, ownerPassword = '', fileId = null, algorithm = 'AES-256',
  PDFLib, encryptPdfCopy = encryptPdfCopyDefault, onProgress = () => {},
 }) {
  if (!(bytes instanceof Uint8Array) || !bytes.length) {
@@ -47,8 +49,8 @@ export async function encryptExportCopy({
  // handed to the encryptor do too, because its rewrite preserves the trailer
  // identifier of its input.
  const prepared = (await enforceFileId({bytes, fileId, PDFLib, encrypted: false})).bytes;
- onProgress('Encrypting the exported PDF with AES-256…');
+ onProgress(`Encrypting the exported PDF with ${algorithm === 'RC4-128' ? 'RC4 128-bit' : 'AES-256'}…`);
  return encryptPdfCopy({
-  bytes: prepared, password: checked.password, ownerPassword: checked.ownerPassword, PDFLib, onProgress,
+  bytes: prepared, password: checked.password, ownerPassword: checked.ownerPassword, algorithm, PDFLib, onProgress,
  });
 }

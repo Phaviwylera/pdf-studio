@@ -335,7 +335,7 @@ async function exportPdf(event){
   const bytes=checkedExport.bytes;
   let idWarning=checkedExport.status==='preserved'||checkedExport.status==='none'?'':fileIdWarning(fileId,checkedExport.actual||null);
   if(encrypted){
-   const protectedBytes=await encryptExportCopy({bytes,password:passwords.password,confirmation:passwords.password,ownerPassword:passwords.ownerPassword,fileId,PDFLib,onProgress:message=>{showExportFeedback(message);status(message)}});
+   const protectedBytes=await encryptExportCopy({bytes,password:passwords.password,confirmation:passwords.password,ownerPassword:passwords.ownerPassword,algorithm:$('export-algorithm').value,fileId,PDFLib,onProgress:message=>{showExportFeedback(message);status(message)}});
    const protectedId=await readPdfFileId(protectedBytes,PDFLib);
    if(fileId&&!sameFileId(fileId,protectedId))idWarning='The AES-256 copy could not keep the original file identifier.';
    const name=encryptedExportName(currentExportName());
@@ -434,7 +434,7 @@ async function encryptStandalonePdf(event){
  setBusy(true);
  try{
   const bytes=new Uint8Array(await file.arrayBuffer());
-  const encrypted=await encryptPdfCopy({bytes,password,ownerPassword,metadataFile:metadataPayload,fileId:await readPdfFileId(bytes,PDFLib),PDFLib,onProgress:message=>{$('encrypt-feedback').textContent=message;status(message)}});
+  const encrypted=await encryptPdfCopy({bytes,password,ownerPassword,algorithm:$('encrypt-algorithm').value,metadataFile:metadataPayload,fileId:await readPdfFileId(bytes,PDFLib),PDFLib,onProgress:message=>{$('encrypt-feedback').textContent=message;status(message)}});
   const name=file.name.replace(/\.pdf$/i,'')+'-encrypted.pdf';
   download(new Blob([encrypted],{type:'application/pdf'}),name);
   $('encrypt-dialog').close();

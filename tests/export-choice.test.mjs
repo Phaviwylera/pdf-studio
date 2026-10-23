@@ -195,7 +195,7 @@ test('encrypted export validates, natively exports, encrypts, downloads and clea
  assert.ok(start >= 0 && end > start, 'the export handler is present');
  const handler = app.slice(start, end);
  assert.ok(handler.indexOf('exportNativePdf(') < handler.indexOf('encryptExportCopy('), 'the native export happens first');
- assert.match(handler, /encryptExportCopy\(\{bytes,password:passwords\.password,confirmation:passwords\.password,ownerPassword:passwords\.ownerPassword,fileId,PDFLib/);
+ assert.match(handler, /encryptExportCopy\(\{bytes,password:passwords\.password,confirmation:passwords\.password,ownerPassword:passwords\.ownerPassword,algorithm:\$\('export-algorithm'\)\.value,fileId,PDFLib/);
  assert.doesNotMatch(handler, /metadataFile/, 'metadata is already inside the native export bytes');
  assert.match(handler, /const name=encryptedExportName\(currentExportName\(\)\)/);
  assert.match(handler, /download\(new Blob\(\[protectedBytes\],\{type:'application\/pdf'\}\),name\)/);
