@@ -82,9 +82,9 @@ test('file identifier dialog restores the original /ID into exports', async () =
  assert.match(app, /const fileId=activeFileId\(\);/);
  assert.match(app, /metadataRecord:sourceMetadata,uploadedMetadata,fileId,onProgress:status/);
  assert.match(app, /enforceFileId\(\{bytes:nativeBytes,fileId,PDFLib\}\)/);
- assert.match(app, /ownerPassword:passwords\.ownerPassword,fileId,PDFLib,onProgress/);
+ assert.match(app, /ownerPassword:passwords\.ownerPassword,algorithm:\$\('export-algorithm'\)\.value,fileId,PDFLib,onProgress/);
  assert.match(app, /signPdfCopy\(\{bytes,sourceBytes:uploadedOriginal,credential,PDFLib,forge:window\.forge,fileId\}\)/);
- assert.match(app, /encryptPdfCopy\(\{bytes,password,ownerPassword,metadataFile:metadataPayload,fileId:await readPdfFileId/);
+ assert.match(app, /encryptPdfCopy\(\{bytes,password,ownerPassword,algorithm:\$\('encrypt-algorithm'\)\.value,metadataFile:metadataPayload,fileId:await readPdfFileId/);
 });
 
 test('the Fonts dialog reports page-1 programs and reuses them on every page', async () => {
@@ -127,4 +127,17 @@ test('document fonts are exported by reusing their existing font dictionary', as
  assert.match(font, /export function parseCidWidths\(descendant, context, L\)/);
  assert.match(font, /export function readDocumentFont\(ref, context, L\)/);
  assert.match(font, /export function documentFontEncoder\(font, \{wordSpacing = 0\} = \{\}\)/);
+});
+
+test('the encryption algorithm can be chosen for an export and for the standalone encryptor', async () => {
+ const html = await read('../dist/index.html');
+ const app = await read('../dist/app.mjs');
+ for (const id of ['export-algorithm', 'encrypt-algorithm'])
+  assert.match(html, new RegExp(`<select id="${id}">`), `${id} offers a choice`);
+ assert.match(html, /<option value="AES-256" selected>AES-256/, 'AES-256 stays the default');
+ assert.match(html, /<option value="RC4-128">RC4 128-bit/, 'the legacy scheme is offered');
+ assert.match(app, /algorithm:\$\('export-algorithm'\)\.value/);
+ assert.match(app, /algorithm:\$\('encrypt-algorithm'\)\.value/);
+ // RC4 needs no Web Crypto, so a plain http page can still produce one.
+ assert.match(await read('../dist/encrypt.mjs'), /RC4 128-bit works without it/);
 });

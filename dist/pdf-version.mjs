@@ -8,6 +8,9 @@
 // fingerprint, so both places are raised together.
 
 export const AES_256_MIN_VERSION = '1.7';
+// RC4 with a 128-bit key (V 2 / R 3) is defined from PDF 1.4 on. A file that
+// already claims a newer version keeps it: nothing about RC4 needs raising.
+export const RC4_128_MIN_VERSION = '1.4';
 
 function versionNumber(version) {
  const match = /^(\d+)\.(\d+)$/.exec(String(version || '').trim());
