@@ -1,5 +1,6 @@
 import {signatureProtectionForDocument} from './native-export.mjs';
 import {applyFileId} from './file-id.mjs';
+import {alignHeader} from './header-marker.mjs';
 function binary(bytes){let result='';for(let i=0;i<bytes.length;i+=8192)result+=String.fromCharCode(...bytes.subarray(i,i+8192));return result;}
 export async function fingerprints(bytes){const hex=b=>Array.from(new Uint8Array(b),v=>v.toString(16).padStart(2,'0')).join('');const [sha256,sha512]=await Promise.all([crypto.subtle.digest('SHA-256',bytes),crypto.subtle.digest('SHA-512',bytes)]);return {bytes:bytes.length,sha256:hex(sha256),sha512:hex(sha512)};}
 export function readCertificate(bytes,password,F,now=new Date()){
@@ -31,7 +32,7 @@ export async function signPdfCopy({bytes,sourceBytes,credential,PDFLib:L,forge:F
  const sig=d.context.obj({Type:'Sig',Filter:'Adobe.PPKLite',SubFilter:'adbe.pkcs7.detached',ByteRange:[0,9999999999,9999999999,9999999999],Contents:L.PDFHexString.of('0'.repeat(32768)),Name:L.PDFString.of(printable(info.name)),Reason:L.PDFString.of('New signed copy; see Signing Record page'),M:L.PDFString.fromDate(now)});
  const sigRef=d.context.register(sig);const widget=d.context.obj({Type:'Annot',Subtype:'Widget',FT:'Sig',Rect:[0,0,0,0],V:sigRef,T:L.PDFString.of('PDF Studio authorized signer'),F:132,P:page.ref});const widgetRef=d.context.register(widget);page.node.addAnnot(widgetRef);
  let form=d.catalog.lookupMaybe(L.PDFName.of('AcroForm'),L.PDFDict);if(!form){form=d.context.obj({Fields:[]});d.catalog.set(L.PDFName.of('AcroForm'),d.context.register(form));}let fields=form.lookupMaybe(L.PDFName.of('Fields'),L.PDFArray);if(!fields){fields=d.context.obj([]);form.set(L.PDFName.of('Fields'),fields);}fields.push(widgetRef);form.set(L.PDFName.of('SigFlags'),L.PDFNumber.of(3));
- const out=await d.save({useObjectStreams:false,addDefaultPage:false});const raw=binary(out),marker='/ByteRange [ 0 9999999999 9999999999 9999999999 ]',at=raw.indexOf(marker);if(at<0||raw.indexOf(marker,at+1)>=0)throw new Error('Could not safely locate signature placeholder.');
+ const out=alignHeader(await d.save({useObjectStreams:false,addDefaultPage:false}),bytes);const raw=binary(out),marker='/ByteRange [ 0 9999999999 9999999999 9999999999 ]',at=raw.indexOf(marker);if(at<0||raw.indexOf(marker,at+1)>=0)throw new Error('Could not safely locate signature placeholder.');
  const contentsAt=raw.indexOf('/Contents <'+'0'.repeat(64),at);if(contentsAt<0)throw new Error('Missing signature contents placeholder.');const start=contentsAt+'/Contents '.length,end=start+32768+2;
  if(raw[end-1]!=='>')throw new Error('Unexpected signature placeholder size.');const range=`/ByteRange [ 0 ${start} ${end} ${out.length-end} ]`;if(range.length>marker.length)throw new Error('PDF exceeds signing range capacity.');out.set(new TextEncoder().encode(range.padEnd(marker.length,' ')),at);
  const signed=new Uint8Array(start+out.length-end);signed.set(out.subarray(0,start));signed.set(out.subarray(end),start);

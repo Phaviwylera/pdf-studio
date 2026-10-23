@@ -3,6 +3,7 @@ import { applyUploadedMetadata, parseUploadedMetadata } from './metadata.mjs';
 import { signatureProtectionForDocument } from './native-export.mjs';
 import { applyFileId, sameFileId, fileIdFromDocument } from './file-id.mjs';
 import { ensureCatalogVersion, ensurePdfVersion, AES_256_MIN_VERSION, RC4_128_MIN_VERSION } from './pdf-version.mjs';
+import { alignHeader } from './header-marker.mjs';
 
 /**
  * Create an encrypted copy without changing the editor's currently open document.
@@ -124,10 +125,14 @@ export async function encryptPdfCopy({
       allowFillingForms: false,
       allowExtraction: true,
     });
-    const bytes = encrypted instanceof Uint8Array ? encrypted : new Uint8Array(encrypted);
+    const raw = encrypted instanceof Uint8Array ? encrypted : new Uint8Array(encrypted);
     // The header must not claim an older version than the encryption it carries;
     // this covers bytes produced by any other encryptor and raises only.
-    return ensurePdfVersion({bytes, version: minVersion});
+    const raised = ensurePdfVersion({bytes: raw, version: minVersion});
+    // Encryption is a second save, and the encryptor writes its own binary marker
+    // after the version line. Re-align to the copy that came in, so an encrypted
+    // export names the same writer as the plain one instead of naming this library.
+    return alignHeader(raised, bytes);
   } catch (error) {
     if (error?.name === 'AlreadyEncryptedError') throw new Error('This PDF is already encrypted. Unlock it before creating a new encrypted copy.');
     if (!legacyRc4 && /crypto|subtle|secure context/i.test(error?.message || '')) throw new Error('AES-256 encryption needs a secure browser context (HTTPS or localhost). RC4 128-bit works without it.');
