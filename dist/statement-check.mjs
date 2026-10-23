@@ -239,13 +239,31 @@ export function classifyRow(row, columns = null) {
   .map(cell => cell.block.text)
   .filter(text => !isReference(text))
   .join(' ').trim();
- return {date: dateCell?.date || null, dateBlock: dateCell?.block || null, narration, amount, balance, cells};
+ const narrationBlocks = cells.filter(cell => !used.has(cell)).filter(cell => !isReference(cell.block.text)).map(cell => cell.block);
+ return {date: dateCell?.date || null, dateBlock: dateCell?.block || null, narration, narrationBlocks, amount, balance, cells};
 }
 
 const DIRECTION = [/^([A-Za-z]{2,10})\b/];
 // A refund, return or reversal is the one time a code legitimately takes the
 // other direction, so those rows never count as an outlier.
 const REVERSAL = /(?:^|[^A-Za-z])(reversal|reversed|refund|refunded|return|returned|chargeback|rev)(?:[^A-Za-z]|$)/i;
+// "UPIAR" and "UPIAB" are the same narration with the direction in its last
+// letter. When a row's direction changed, the code has to change with it, or the
+// row becomes the only one of its kind in the whole statement.
+function siblingCode(code, direction, directions) {
+ if (!code || !direction || code.length < 3) return null;
+ const stem = code.slice(0, -1);
+ let best = null;
+ for (const [candidate, tally] of directions) {
+  if (candidate === code || candidate.length !== code.length) continue;
+  if (candidate.slice(0, -1) !== stem) continue;
+  const wanted = tally[direction] || 0;
+  const other = tally[direction === 'CR' ? 'DR' : 'CR'] || 0;
+  if (wanted < 2 || wanted < other) continue;
+  if (!best || wanted > best.wanted) best = {code: candidate, wanted};
+ }
+ return best ? best.code : null;
+}
 
 /** The leading code of a narration ("UPAR/payment", "NEFT CR", "IMPS/…"). */
 export function narrationCode(text) {
@@ -299,6 +317,7 @@ export function extractStatementRows(pages, {tolerance = 2.5} = {}) {
     y: group.y,
     date: classified.date,
     narration: classified.narration,
+    narrationBlock: classified.narrationBlocks?.[0] || null,
     amount: classified.amount ? {
      cents: classified.amount.amount.cents,
      value: classified.amount.amount.value,
@@ -425,7 +444,12 @@ export function checkStatement(rows, {tolerance = BALANCE_TOLERANCE} = {}) {
    const number = transactions.indexOf(row) + 1;
    if (checked[number - 1].checks.includes('narration_direction')) continue;
    checked[number - 1].checks.push('narration_direction');
-   issues.push(issue('narration_direction', 'serious', {...row, number}, `narration ${row.narration.slice(0, 24)} is marked ${row.amount.drcr} while ${tally[majority]} of ${total} ${code} rows are ${majority}.`));
+   const sibling = siblingCode(code, row.amount.drcr, directions);
+   const hint = sibling ? ` This statement uses ${sibling} for ${row.amount.drcr} rows: changing the code keeps the row consistent.` : '';
+   issues.push(issue('narration_direction', 'serious', {...row, number}, `narration ${row.narration.slice(0, 24)} is marked ${row.amount.drcr} while ${tally[majority]} of ${total} ${code} rows are ${majority}.${hint}`));
+   const block = row.narrationBlock;
+   if (sibling && block && String(block.text).includes(code))
+    fixes.push({page: row.page, row: number, blockId: block.id, from: block.text, to: String(block.text).replace(code, sibling), x: block.x, y: block.y, expected: null, kind: 'narration'});
   }
  }
  const closingCents = transactions[transactions.length - 1].balance.cents;
