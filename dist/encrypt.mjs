@@ -1,6 +1,7 @@
 import { encryptPDF } from './vendor/pdf-encrypt/index.mjs';
 import { applyUploadedMetadata, parseUploadedMetadata } from './metadata.mjs';
 import { signatureProtectionForDocument } from './native-export.mjs';
+import { applyFileId, sameFileId, fileIdFromDocument } from './file-id.mjs';
 
 /**
  * Create an encrypted copy without changing the editor's currently open document.
@@ -9,7 +10,7 @@ import { signatureProtectionForDocument } from './native-export.mjs';
  * source PDF's existing native metadata is retained unchanged.
  */
 export async function encryptPdfCopy({
-  bytes, password, ownerPassword = '', metadataFile = null,
+  bytes, password, ownerPassword = '', metadataFile = null, fileId = null,
   PDFLib, onProgress = () => {}, encrypt = encryptPDF,
 }) {
   if (!(bytes instanceof Uint8Array) || !bytes.length) throw new Error('Choose a PDF to encrypt.');
@@ -40,13 +41,28 @@ export async function encryptPdfCopy({
   }
 
   let output = bytes.slice();
+  let restoreFileId = !!fileId && !sameFileId(fileId, fileIdFromDocument(source, PDFLib));
   if (upload) {
     onProgress('Applying the metadata JSON to native Info/XMP…');
     try {
       applyUploadedMetadata(source, upload, PDFLib);
+      if (restoreFileId) applyFileId(source, fileId, PDFLib);
       output = await source.save({ useObjectStreams: true, addDefaultPage: false });
+      restoreFileId = false;
     } catch (error) {
       throw new Error(`Could not apply the metadata JSON: ${error?.message || 'the PDF could not be saved.'}`);
+    }
+  }
+  // Keep the source trailer /ID (both values, and its literal or hexadecimal
+  // encoding) across the encryption rewrite. The encrypted trailer is written
+  // from the input document, so restoring it here is enough.
+  if (restoreFileId) {
+    onProgress('Restoring the source file identifier…');
+    try {
+      applyFileId(source, fileId, PDFLib);
+      output = await source.save({ useObjectStreams: true, addDefaultPage: false });
+    } catch (error) {
+      throw new Error(`Could not restore the source file identifier: ${error?.message || 'the PDF could not be saved.'}`);
     }
   }
 

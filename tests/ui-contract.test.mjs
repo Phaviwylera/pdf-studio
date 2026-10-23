@@ -63,3 +63,26 @@ test('downloads expose a manual retry outside blocked preview frames', async () 
  assert.match(decrypt, /--decrypt/);
  assert.match(decrypt, /new URL\('\.\/vendor\/qpdf\/qpdf\.wasm', import\.meta\.url\)/);
 });
+
+test('file identifier dialog restores the original /ID into exports', async () => {
+ const html = await read('../dist/index.html');
+ const app = await read('../dist/app.mjs');
+ assert.match(html, /id="fileid" disabled>File ID</);
+ assert.match(html, /id="fileid-dialog"/);
+ assert.match(html, /id="fileid-info" class="fingerprint-output"/);
+ assert.match(html, /id="fileid-file" type="file" accept="application\/pdf,\.pdf"/);
+ assert.match(html, /id="fileid-status" role="status"/);
+ assert.match(html, /id="fileid-clear" disabled/);
+ assert.match(app, /import \{readPdfFileId, sameFileId, fileIdWarning, enforceFileId\} from '\.\/file-id\.mjs'/);
+ assert.match(app, /const uploadedFileId=await readPdfFileId\(bytes,PDFLib\)/);
+ assert.match(app, /sourceFileId=uploadedFileId;workingFileId=nextWorkingFileId/);
+ assert.match(app, /function activeFileId\(\)\{return restoreFileId\|\|sourceFileId\|\|null\}/);
+ assert.match(app, /async function selectFileIdSource\(file\)/);
+ assert.match(app, /\$\('fileid-file'\)\.onchange=\(\)=>selectFileIdSource/);
+ assert.match(app, /const fileId=activeFileId\(\);/);
+ assert.match(app, /metadataRecord:sourceMetadata,uploadedMetadata,fileId,onProgress:status/);
+ assert.match(app, /enforceFileId\(\{bytes:nativeBytes,fileId,PDFLib\}\)/);
+ assert.match(app, /ownerPassword:passwords\.ownerPassword,fileId,PDFLib,onProgress/);
+ assert.match(app, /signPdfCopy\(\{bytes,sourceBytes:uploadedOriginal,credential,PDFLib,forge:window\.forge,fileId\}\)/);
+ assert.match(app, /encryptPdfCopy\(\{bytes,password,ownerPassword,metadataFile:metadataPayload,fileId:await readPdfFileId/);
+});

@@ -1,4 +1,5 @@
 import { encryptPdfCopy as encryptPdfCopyDefault } from './encrypt.mjs';
+import { enforceFileId } from './file-id.mjs';
 
 export const MIN_EXPORT_PASSWORD_LENGTH = 8;
 
@@ -35,15 +36,19 @@ export function encryptedExportName(name = 'document.pdf') {
  * bytes; encryptPdfCopy then protects that exact document with AES-256.
  */
 export async function encryptExportCopy({
- bytes, password, confirmation, ownerPassword = '',
+ bytes, password, confirmation, ownerPassword = '', fileId = null,
  PDFLib, encryptPdfCopy = encryptPdfCopyDefault, onProgress = () => {},
 }) {
  if (!(bytes instanceof Uint8Array) || !bytes.length) {
   throw new Error('Create the native export before encrypting it.');
  }
  const checked = validateExportPasswords({password, confirmation, ownerPassword});
+ // The native export already carries the selected /ID; make sure the bytes
+ // handed to the encryptor do too, because its rewrite preserves the trailer
+ // identifier of its input.
+ const prepared = (await enforceFileId({bytes, fileId, PDFLib, encrypted: false})).bytes;
  onProgress('Encrypting the exported PDF with AES-256…');
  return encryptPdfCopy({
-  bytes, password: checked.password, ownerPassword: checked.ownerPassword, PDFLib, onProgress,
+  bytes: prepared, password: checked.password, ownerPassword: checked.ownerPassword, PDFLib, onProgress,
  });
 }
