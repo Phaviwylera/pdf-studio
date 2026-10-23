@@ -56,6 +56,10 @@ The preview, the in-place editor and native export share one typography model, s
 - Original horizontal scaling is captured once as a horizontal text scale. Stroke weight is compensated for that scale in the preview so it matches the exported `w` value in page points.
 - The text color control is the fill color. For stroke-only text it shows and edits the stroke color instead, so the visible color never sits in a hidden channel; fill + stroke text keeps its separately captured stroke color. Underlines follow the visible paint channel.
 
+- An edited value is written at the width its own glyph advances give it. It is never squeezed into the width of the value it replaces: the browser's measurement correction (`width ÷ canvas width`) belongs to the preview, and writing it into the page produces a text matrix with a fractional horizontal scale that no producer writes and a forensic check reads as an edit.
+- A value that grows or shrinks keeps the right edge of its column (money stays aligned); prose keeps its left edge. The replacement reuses the matrix the producer already wrote for that run, so the text object keeps one placement instead of gaining a second.
+- An edit that changes neither width nor position is written into the original text-showing operation, leaving the operator sequence byte-for-byte the same apart from the glyphs.
+
 If a text block mixes paint modes, stroke weights, colors, spacing or text rise between its text-show operators, it is treated as inspection-only rather than exporting a guessed style. Complex-script shaping is outside this model.
 
 ### Original fonts
@@ -157,7 +161,7 @@ Optionally choose a UTF-8 `.json` metadata file (up to 8 MB) to **replace the PD
 
 Downloads use a blob link appended to the page. After any download the app shows a **Download ready** panel with the filename, size, a **Save again** link, an **Open file** link, and — inside an embedded preview — **Open app in new tab**. Embedded preview frames can block automatic downloads even when the file was created successfully; use that panel or open the app in its own tab and retry there.
 
-Run metadata, typography, export-choice, encryption, decryption, file-identifier, font-inventory, export-fingerprint, statement-check, statement-layout, hash-fingerprint and module-wiring regression tests with `node --test tests/*.test.mjs` (Node.js required only for tests). Typography tests cover 0.001 pt normalization, glyph-advance layout without kerning, word/letter spacing, paint modes, stroke weight and baseline placement. Syntax-check the runtime and test modules with `node --check dist/*.mjs` and `node --check tests/*.mjs` before running the suite.
+Run metadata, typography, export-choice, in-place export, encryption, decryption, file-identifier, font-inventory, export-fingerprint, statement-check, statement-layout, hash-fingerprint and module-wiring regression tests with `node --test tests/*.test.mjs` (Node.js required only for tests). Typography tests cover 0.001 pt normalization, glyph-advance layout without kerning, word/letter spacing, paint modes, stroke weight and baseline placement. Syntax-check the runtime and test modules with `node --check dist/*.mjs` and `node --check tests/*.mjs` before running the suite.
 
 ## Protection and signing
 
