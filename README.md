@@ -34,7 +34,7 @@ Signed and view-only documents bypass the export choice: **Export PDF** (shown a
 
 Statements and other bank-issued PDFs are often re-checked with a tamper validator. The export deliberately avoids the artefacts such a check reports:
 
-- **No duplicate typeface copies.** Edited text is drawn with the font object the PDF already embeds, under the resource name the page already gives it. A second program is embedded only for a font the document does not contain, and an unchanged-style edit is written into the original text operator instead of adding a font at all.
+- **No duplicate typeface copies.** Edited text is drawn with the font object the PDF already embeds, under the resource name the page already gives it. Characters the edited page never showed are served from that font's full `ToUnicode` map, or from another font the document already contains, instead of embedding the same program again. A program is embedded only for a typeface the file does not contain yet; a character no existing font can write is reported rather than drawn with a second copy. An unchanged-style edit is written into the original text operator instead of adding a font at all.
 - **No editor-specific font names.** New resources are named `F1`, `F2`, … (forms `Fm1`, …) rather than `PSEditFont<n>` / `PSDocFont<n>`.
 - **No source descriptors.** Exports carry no `Source*` Info keys and no embedded source-metadata attachment.
 - **No deleted-text traces.** Removing a text block deletes the showing operation; a spacing-only `[<n>] TJ` remains only when later text on the same line depends on the pen position. Edited text is rewritten inside its own text object, including size, colour, spacing and position changes, so the replacement is never drawn as a separate block.

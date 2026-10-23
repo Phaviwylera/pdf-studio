@@ -5,6 +5,7 @@ import {exportNativePdf} from '../dist/native-export.mjs';
 import {pdfHeaderVersion, withHeaderVersion, ensureCatalogVersion, ensurePdfVersion, AES_256_MIN_VERSION} from '../dist/pdf-version.mjs';
 import {readFile} from 'node:fs/promises';
 import {buildDocumentFontInventory} from '../dist/font-inventory.mjs';
+import {readDocumentFont} from '../dist/document-font.mjs';
 
 const require = createRequire(import.meta.url);
 const L = require('../dist/vendor/pdf-lib.min.js');
@@ -207,4 +208,67 @@ test('reusing a document font never embeds a second copy of the typeface', async
  const source = await L.PDFDocument.load(original, {updateMetadata: false});
  assert.deepEqual(baseFonts(output), baseFonts(source), 'the same single typeface, with no added subset');
  assert.doesNotMatch(latin1(exported), /PSEditFont|PSDocFont/);
+});
+
+// Two pages sharing one embedded subset: page 1 shows the full alphabet, page 2
+// only "abc". Editing page 2 must not embed the program a second time.
+async function duplicateFixture() {
+ const pdf = await L.PDFDocument.create();
+ pdf.registerFontkit(fontkit);
+ const font = await pdf.embedFont(liberation, {subset: true});
+ pdf.addPage([300, 200]).drawText('Hello world', {x: 20, y: 150, size: 12, font});
+ pdf.addPage([300, 200]).drawText('abc', {x: 20, y: 150, size: 12, font});
+ const bytes = await pdf.save({useObjectStreams: true, addDefaultPage: false});
+ const source = await L.PDFDocument.load(bytes, {updateMetadata: false});
+ const fonts = source.getPage(1).node.Resources().lookup(L.PDFName.of('Font'), L.PDFDict);
+ const [, ref] = fonts.entries()[0];
+ const documentFont = readDocumentFont(ref, source.context, L);
+ const ops = text => ({
+  index: 0, str: text, fontId: 'g_d0_f1', font: {fontMatrix: [0.001, 0, 0, 0.001, 0, 0]},
+  color: '#000000', mode: 0, pattern: false,
+  glyphs: [...text].map(character => {
+   const entry = documentFont.codes.get(character);
+   return {originalCharCode: parseInt(entry.code, 16), unicode: character, width: documentFont.widths.get(entry.code) ?? entry.width, isSpace: false};
+  }),
+ });
+ const settings = {
+  original: bytes,
+  originalFonts: new Map([['g_d0_f1', {data: liberation, parsed: fontkit.create(liberation), name: documentFont.baseFont}]]),
+  fontkit, PDFLib: L,
+ };
+ return {bytes, documentFont, ops, settings};
+}
+function fontReport(pdf) {
+ const objects = [...pdf.context.enumerateIndirectObjects()];
+ return {
+  baseFonts: objects.filter(([, object]) => object instanceof L.PDFDict && object.get(name('BaseFont'))).map(([, object]) => object.get(name('BaseFont')).toString()),
+  programs: objects.filter(([, object]) => object instanceof L.PDFDict && (object.get(name('FontFile2')) || object.get(name('FontFile3')) || object.get(name('FontFile')))).length,
+ };
+}
+
+test('characters the page never showed are taken from the document font, not a second copy', async () => {
+ const {bytes, documentFont, ops, settings} = await duplicateFixture();
+ const edited = block({id: '2:0', page: 2, text: 'Hello word', fontName: documentFont.baseFont, ops: [0]});
+ const exported = await exportNativePdf({
+  ...settings, edits: new Map([['2:0', edited]]),
+  getPage: async () => ({vp: {transform: [1, 0, 0, -1, 0, 200]}, info: {ops: [ops('abc')]}, blocks: [edited]}),
+ });
+ const before = fontReport(await L.PDFDocument.load(bytes, {updateMetadata: false}));
+ const after = fontReport(await L.PDFDocument.load(exported, {updateMetadata: false}));
+ assert.equal(after.programs, before.programs, 'no second program is embedded');
+ assert.deepEqual(after.baseFonts, before.baseFonts, 'the typeface is not duplicated under a new subset name');
+ assert.equal(new Set(after.baseFonts).size, 1, 'one typeface entry');
+ assert.doesNotMatch(latin1(exported), /PSEditFont|PSDocFont/);
+});
+
+test('a character the subset cannot map is refused instead of duplicating the font', async () => {
+ const {documentFont, ops, settings} = await duplicateFixture();
+ const edited = block({id: '2:0', page: 2, text: 'Hello ~', fontName: documentFont.baseFont, ops: [0]});
+ await assert.rejects(
+  () => exportNativePdf({
+   ...settings, edits: new Map([['2:0', edited]]),
+   getPage: async () => ({vp: {transform: [1, 0, 0, -1, 0, 200]}, info: {ops: [ops('abc')]}, blocks: [edited]}),
+  }),
+  /original font cannot encode "~"/,
+ );
 });
