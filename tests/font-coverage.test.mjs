@@ -133,5 +133,7 @@ test('editor registers each embedded program and hands it to native export', asy
  assert.match(app, /originalFonts\.clear\(\)/);
  const exporter = await readFile(new URL('../dist/native-export.mjs', import.meta.url), 'utf8');
  assert.match(exporter, /originalFonts=new Map\(\)/);
- assert.match(exporter, /fontCache\.get\(cacheKey\)/);
+ assert.match(exporter, /mayEmbedTypeface\(candidates,record\.name\)/, 'a typeface the file already contains is never embedded twice');
+ assert.match(exporter, /encodesAll\(entry\.font,block\.text\)/, 'an existing font that covers the text is reused');
+ assert.match(exporter, /The original font cannot encode/, 'a missing character is reported instead of duplicating the font');
 });

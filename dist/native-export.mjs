@@ -3,6 +3,7 @@ import {capturePdfMetadata, restorePdfMetadata, attachSourceMetadata, applyUploa
 import {ensureCatalogVersion} from './pdf-version.mjs';
 import {applyFileId, sameFileId, fileIdFromDocument} from './file-id.mjs';
 import {readDocumentFont, documentFontEncoder} from './document-font.mjs';
+import {fontKey} from './font-inventory.mjs';
 const WS=c=>c===0||c===9||c===10||c===12||c===13||c===32;
 const DELIM=c=>WS(c)||'()<>[]{}/%'.includes(String.fromCharCode(c));
 const ascii=bytes=>{let s='';for(let i=0;i<bytes.length;i+=8192)s+=String.fromCharCode(...bytes.subarray(i,i+8192));return s};
@@ -155,6 +156,35 @@ export async function inspectSignatureProtection(original,L){
   return {locked:true,signed:false,count:0,unknown:true,reason:encrypted?'encrypted':!L?.PDFDocument?'library':'parse'};
  }
 }
+// Every font dictionary the document already contains, nearest page first, with
+// its code map. New characters are served from these instead of embedding a
+// second copy of a typeface that is already in the file.
+function documentFontCandidates(document, context, L, pageIndex = 0) {
+ const pages = [...Array(document.getPageCount()).keys()].sort((a, b) => Math.abs(a - pageIndex) - Math.abs(b - pageIndex));
+ const seen = new Set(), candidates = [];
+ for (const index of pages) {
+  const fonts = lookup(document.getPage(index).node.Resources(), 'Font', L);
+  if (!fonts) continue;
+  for (const [name, ref] of fonts.entries()) {
+   if (!ref) continue;
+   const key = ref.toString();
+   if (seen.has(key)) continue;
+   seen.add(key);
+   let font = null;
+   try { font = readDocumentFont(ref, context, L); } catch { font = null; }
+   if (font) candidates.push({ref, font, name: name.toString(), page: index + 1});
+  }
+ }
+ return candidates;
+}
+function encodesAll(font, text) { return [...new Set(String(text))].every(character => font.codes.has(character)); }
+// The subset a producer embedded rarely covers new characters, and embedding the
+// same program again shows up as a second copy of the typeface (ArialMT and
+// ArialMT-7098). Only a typeface the file does not contain yet is embedded.
+function mayEmbedTypeface(candidates, baseFont) {
+ const identity = fontKey(baseFont || '');
+ return !identity || !candidates.some(entry => fontKey(entry.font.baseFont || '') === identity);
+}
 export async function exportNativePdf({original,edits,getPage,fonts=new Map(),originalFonts=new Map(),documentFonts=new Map(),PDFLib:L,fontkit,metadataRecord=null,uploadedMetadata=null,fileId=null,attachProvenance=false,onProgress=()=>{}}){
  const changes=[...edits.values()];
  if(!changes.length&&!uploadedMetadata){
@@ -197,7 +227,43 @@ export async function exportNativePdf({original,edits,getPage,fonts=new Map(),or
     pair.slot.node.patches.push({start:pair.slot.operation.start,end:pair.slot.operation.end,text});
    }
   }}
-const saved=saveTree(tree,context,L,counter);if(saved.resources)resources=saved.resources;const fontResources=lookup(resources,'Font',L);let drawing='';for(const block of pageChanges){if(block.removed||!block.text||inPlace.has(block.id))continue;let encoder,fontObject;if(block.font==='original'&&block.ops?.length){const pair=byIndex.get(block.ops[0]),missing=originalMissingChars(pair.map,block.text),original=originalFonts.get(block.fontId)||originalFonts.get(pair.info.fontId),cacheKey=`original:${block.fontId||pair.info.fontId}`;let embedded=missing.length&&original?.data?fontCache.get(cacheKey):null;if(missing.length&&original?.data&&!embedded){try{embedded=await output.embedFont(new Uint8Array(original.data),{subset:true});fontCache.set(cacheKey,embedded)}catch{embedded=null}}if(embedded){fontObject=embedded.ref;const spaceGlyph=original?.parsed?.glyphForCodePoint?.(32),spaceAdvance=pair.map.get(' ')?.unitWidth??(spaceGlyph&&original.parsed.unitsPerEm?spaceGlyph.advanceWidth/original.parsed.unitsPerEm:.25);encoder=(text,size)=>{try{const words=String(text).split(' '),space=spaceAdvance*size,wordGap=size>0?(((block.wordSpacing||0)+(block.spacing||0))*1000/size):0,width=words.filter(word=>word).reduce((total,word)=>total+embedded.widthOfTextAtSize(word,size),0)+Math.max(0,words.length-1)*space;if(words.length===1)return {hex:embedded.encodeText(text).asString(),width,count:Array.from(text).length};const tokens=[];for(let i=0;i<words.length;i++){if(i)tokens.push(number(-spaceAdvance*1000-wordGap));if(words[i])tokens.push(`<${embedded.encodeText(words[i]).asString()}>`)}return {hex:'',width,count:Array.from(text).length,show:`[${tokens.join(' ')}] TJ`}}catch(error){throw new Error(`The original embedded font cannot encode ${JSON.stringify(originalMissingChars(pair.map,text)[0]||'a replacement character')}. Load the full TTF/OTF for this font; no image conversion was performed.`)}}}else{fontObject=pair.slot.fontObject;encoder=(text,size)=>originalEncoder(pair.map,text,size)}}else if(documentFonts.has(block.font)&&!fonts.get(block.font)){
+const saved=saveTree(tree,context,L,counter);if(saved.resources)resources=saved.resources;const fontResources=lookup(resources,'Font',L);let drawing='';for(const block of pageChanges){if(block.removed||!block.text||inPlace.has(block.id))continue;let encoder,fontObject;if(block.font==='original'&&block.ops?.length){
+ const pair=byIndex.get(block.ops[0]),missing=originalMissingChars(pair.map,block.text);
+ if(!missing.length){
+  fontObject=pair.slot.fontObject;
+  encoder=(text,size)=>originalEncoder(pair.map,text,size);
+ }else{
+  const record=originalFonts.get(block.fontId)||originalFonts.get(pair.info.fontId);
+  const current=pair.slot.fontObject?.toString();
+  // Its own dictionary comes first: the observed page map only covers the glyphs
+  // this page drew, while its ToUnicode maps the whole subset.
+  const candidates=documentFontCandidates(output,context,L,n-1);
+  const own=candidates.find(entry=>entry.ref.toString()===current);
+  const reuse=(own&&encodesAll(own.font,block.text)?own:null)||candidates.find(entry=>encodesAll(entry.font,block.text));
+  if(reuse){
+   // Another font in this document already covers the text: point at it (its
+   // object is reused, nothing is embedded).
+   fontObject=reuse.ref;
+   encoder=documentFontEncoder(reuse.font,{wordSpacing:block.wordSpacing||0});
+  }else if(record?.data&&mayEmbedTypeface(candidates,record.name)){
+   let embedded=fontCache.get(`original:${fontKey(record.name||'')||record.id}`);
+   if(!embedded){
+    try{embedded=await output.embedFont(new Uint8Array(record.data),{subset:true})}catch{embedded=null}
+    if(embedded)fontCache.set(`original:${fontKey(record.name||'')||record.id}`,embedded);
+   }
+   if(!embedded)throw new Error(`The original font cannot encode ${JSON.stringify(missing[0])}. Choose an available font or load a TTF/OTF font; no image conversion was performed.`);
+   fontObject=embedded.ref;
+   const spaceGlyph=record?.parsed?.glyphForCodePoint?.(32),spaceAdvance=pair.map.get(' ')?.unitWidth??(spaceGlyph&&record.parsed.unitsPerEm?spaceGlyph.advanceWidth/record.parsed.unitsPerEm:.25);
+   encoder=(text,size)=>{try{const words=String(text).split(' '),space=spaceAdvance*size,wordGap=size>0?(((block.wordSpacing||0)+(block.spacing||0))*1000/size):0,width=words.filter(word=>word).reduce((total,word)=>total+embedded.widthOfTextAtSize(word,size),0)+Math.max(0,words.length-1)*space;if(words.length===1)return {hex:embedded.encodeText(text).asString(),width,count:Array.from(text).length};const tokens=[];for(let i=0;i<words.length;i++){if(i)tokens.push(number(-spaceAdvance*1000-wordGap));if(words[i])tokens.push(`<${embedded.encodeText(words[i]).asString()}>`)}return {hex:'',width,count:Array.from(text).length,show:`[${tokens.join(' ')}] TJ`}}catch(error){throw new Error(`The original embedded font cannot encode ${JSON.stringify(missing[0]||'a replacement character')}. Load the full TTF/OTF for this font; no image conversion was performed.`)}}
+  }else{
+   // Name the character no font in this document can write, not just the first
+   // one the page never happened to show.
+   const best=candidates.reduce((a,entry)=>!a||entry.font.codes.size>a.font.codes.size?entry:a,null);
+   const uncovered=best?[...new Set(block.text)].filter(character=>!best.font.codes.has(character)):[];
+   throw new Error(`The original font cannot encode ${JSON.stringify(uncovered[0]||missing[0])}. Choose an available font or load a TTF/OTF font; no image conversion was performed.`);
+  }
+ }
+}else if(documentFonts.has(block.font)&&!fonts.get(block.font)){
  // Reuse the font dictionary that is already in this PDF (normally the page-1
  // program) instead of embedding the program a second time: the edited page's
  // /Font resource points at the existing object and the text is written with
@@ -210,7 +276,16 @@ const saved=saveTree(tree,context,L,counter);if(saved.resources)resources=saved.
  // at the donor object itself, so nothing is re-embedded.
  fontObject=ref;
  encoder=documentFontEncoder(donorFont,{wordSpacing:block.wordSpacing||0});
-}else{const upload=fonts.get(block.font),key=upload?block.font:standardName(block);let font=fontCache.get(key);if(!font){try{font=upload?await output.embedFont(upload.data,{subset:true}):await output.embedFont(key)}catch(error){throw new Error('This font could not be embedded. Load a valid TTF or OTF font; no image conversion was performed.')}fontCache.set(key,font)}fontObject=font.ref;encoder=(text,size)=>{try{return {hex:font.encodeText(text).asString(),width:font.widthOfTextAtSize(text,size),count:Array.from(text).length}}catch(error){throw new Error('This font cannot encode a replacement character. Choose the original font or load a TTF/OTF font; no image conversion was performed.')}}}const reused=existingName(fontResources,fontObject);
+}else{
+ // A standard or loaded substitute must not create a second copy of a typeface
+ // the document already contains: reuse the document's own font when it is the
+ // same typeface and covers the text.
+ const upload=fonts.get(block.font),identity=fontKey(block.fontName||'');
+ const candidate=!upload&&identity?documentFontCandidates(output,context,L,n-1).find(entry=>fontKey(entry.font.baseFont||'')===identity&&encodesAll(entry.font,block.text)):null;
+ if(candidate){fontObject=candidate.ref;encoder=documentFontEncoder(candidate.font,{wordSpacing:block.wordSpacing||0})}
+ else{
+ const key=upload?block.font:standardName(block);let font=fontCache.get(key);if(!font){try{font=upload?await output.embedFont(upload.data,{subset:true}):await output.embedFont(key)}catch(error){throw new Error('This font could not be embedded. Load a valid TTF or OTF font; no image conversion was performed.')}fontCache.set(key,font)}fontObject=font.ref;encoder=(text,size)=>{try{return {hex:font.encodeText(text).asString(),width:font.widthOfTextAtSize(text,size),count:Array.from(text).length}}catch(error){throw new Error('This font cannot encode a replacement character. Choose the original font or load a TTF/OTF font; no image conversion was performed.')}}
+ }}const reused=existingName(fontResources,fontObject);
  const name=reused||freshName(fontResources,'F',counter,L);
  if(!reused)fontResources.set(name,fontObject);
  drawing+=drawNative(block,encoder,name.toString(),data.vp)}if(drawing||saved.resources)page.node.set(L.PDFName.of('Resources'),resources);
