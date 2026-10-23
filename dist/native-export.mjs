@@ -1,6 +1,8 @@
 // Native content-stream edits. No page image is created by this module.
 import {capturePdfMetadata, restorePdfMetadata, attachSourceMetadata, applyUploadedMetadata} from './metadata.mjs';
+import {ensureCatalogVersion} from './pdf-version.mjs';
 import {applyFileId, sameFileId, fileIdFromDocument} from './file-id.mjs';
+import {readDocumentFont, documentFontEncoder} from './document-font.mjs';
 const WS=c=>c===0||c===9||c===10||c===12||c===13||c===32;
 const DELIM=c=>WS(c)||'()<>[]{}/%'.includes(String.fromCharCode(c));
 const ascii=bytes=>{let s='';for(let i=0;i<bytes.length;i+=8192)s+=String.fromCharCode(...bytes.subarray(i,i+8192));return s};
@@ -18,9 +20,65 @@ function concatenate(parts){const total=parts.reduce((n,p)=>n+p.length,0),result
 function stringBytes(operation){const a=operation.args;if(operation.op==='TJ'){const arr=a[0];if(arr?.kind!=='array')throw new Error('Malformed PDF text array.');return concatenate(arr.value.filter(x=>x.kind==='string').map(x=>x.value))}const text=a.at(-1);if(text?.kind!=='string')throw new Error('Malformed PDF text string.');return text.value}
 function decodeGlyphs(slot,info,L){const glyphs=info.glyphs.filter(g=>typeof g!=='number');const raw=stringBytes(slot.operation);const subtype=slot.fontDict?.get(L.PDFName.of('Subtype'))?.toString();const decoded=glyphBytes(raw,glyphs.map(g=>g.originalCharCode),subtype==='/Type0');if(!decoded)throw new Error('Text encoding did not match the original drawing operation. No image conversion was performed.');return {glyphs,decoded}}
 function advanceOnly(slot,info){if(!(slot.state.size>0))throw new Error('Unsupported text advance. No image conversion was performed.');const unit=(info.font.fontMatrix?.[0]??.001);let adjustment=0;for(const g of info.glyphs){if(typeof g==='number')adjustment+=g;else adjustment-=g.width*unit*1000+(slot.state.spacing+(g.isSpace?slot.state.word:0))*1000/slot.state.size}const prefix=slot.operation.op==="'"?'T* ':slot.operation.op==='"'?`${number(slot.state.word)} Tw ${number(slot.state.spacing)} Tc T* `:'';return `${prefix}[${number(adjustment)}] TJ`}
-function buildTree(source,resources,state,context,L,slots,ancestors=[],depth=0){if(depth>30)throw new Error('PDF form nesting is too deep.');const node={source,resources,patches:[],forms:[]};let current={...state},saves=[];for(const operation of parseContent(source)){const a=operation.args;if(operation.op==='q')saves.push({...current});else if(operation.op==='Q')current=saves.pop()||current;else if(operation.op==='Tf'){const fonts=lookup(resources,'Font',L),key=a[0]?.value;const fontObject=fonts?.get(L.PDFName.of(key||''));current={...current,fontObject,fontDict:fontObject?context.lookup(fontObject,L.PDFDict):null,size:a[1]?.value}}else if(operation.op==='Tc')current.spacing=a[0]?.value;else if(operation.op==='Tw')current.word=a[0]?.value;else if(operation.op==='gs'){const ext=lookup(resources,'ExtGState',L),g=ext?.lookupMaybe(L.PDFName.of(a[0]?.value||''),L.PDFDict),font=g?.lookupMaybe(L.PDFName.of('Font'),L.PDFArray);if(font)current={...current,fontObject:font.get(0),fontDict:context.lookup(font.get(0),L.PDFDict),size:font.lookup(1,L.PDFNumber).asNumber()}}else if(['Tj','TJ',"'",'"'].includes(operation.op)){if(operation.op==='"'){current.word=a[0]?.value;current.spacing=a[1]?.value}if(!current.fontObject)throw new Error('PDF text has no resolvable font resource.');slots.push({node,operation,state:{...current},fontObject:current.fontObject,fontDict:current.fontDict})}else if(operation.op==='Do'){const xobjects=lookup(resources,'XObject',L),key=L.PDFName.of(a[0]?.value||''),ref=xobjects?.get(key),object=ref?context.lookup(ref):null;if(object instanceof L.PDFStream&&object.dict.get(L.PDFName.of('Subtype'))?.toString()==='/Form'){if(ancestors.includes(object))throw new Error('Recursive PDF form cannot be safely edited.');const childResources=lookup(object.dict,'Resources',L)||resources;const child=buildTree(ascii(getDecoded(object,L)),childResources,{...current},context,L,slots,[...ancestors,object],depth+1);node.forms.push({operation,object,child})}}}return node}
+// Advance of one text-show operation in 1000-unit text space (the unit TJ
+// numbers use). Positive means the pen moved forward.
+function operationAdvance(slot,info){const size=slot.state.size||0;if(!(size>0))return null;const unit=info.font?.fontMatrix?.[0]??.001;let advance=0;for(const g of info.glyphs){if(typeof g==='number'){advance-=g;continue}advance+=g.width*unit*1000+(slot.state.spacing+(g.isSpace?slot.state.word:0))*1000/size}return advance}
+// A resource name that looks like the document's own: F1, F2 … instead of a
+// name that names the editor.
+function freshName(dict,prefix,counter,L){let name;do{name=L.PDFName.of(`${prefix}${++counter.value}`)}while(dict.has(name));return name}
+// The page may already name the very object we want to draw with. Reusing that
+// name keeps the resource dictionary exactly as the producer wrote it, instead
+// of adding a second name for one font program.
+function existingName(dict,ref){if(!dict||!ref)return null;const target=ref.toString();for(const [key,value] of dict.entries())if(value?.toString()===target)return key;return null}
+// Only the characters changed: same font, size, position, colors and spacing.
+// Such an edit can be written into the original operator, which leaves no
+// deleted text, no spacing-only trace and no extra font resource.
+function sameTextStyle(current,original){
+ if(!current||!original)return false;
+ if(current.font!=='original')return false;
+ if(original.font&&original.font!=='original')return false;
+ for(const key of ['size','x','y','color','strokeColor','strokeWidth','textMode','spacing','wordSpacing','lineheight','align','scaleX','underline','bold','italic'])if(String(current[key]??'')!==String(original[key]??''))return false;
+ return true;
+}
+// Replace the original show operations in place. The first operator carries the
+// new glyphs plus one TJ adjustment that keeps the following text exactly where
+// it was; the remaining operators of the same run are removed outright.
+function patchInPlace(pairs,text,encoder,L){
+ const first=pairs[0];if(!first)return null;
+ if(pairs.some(pair=>pair.slot.fontDict!==first.slot.fontDict))return null;
+ const size=first.slot.state.size;if(!(size>0))return null;
+ if(originalMissingChars(first.map,text).length)return null;
+ let total=0;for(const pair of pairs){const advance=operationAdvance(pair.slot,pair.info);if(advance===null)return null;total+=advance}
+ let encoded;try{encoded=encoder(text,size)}catch{return null}
+ const widthUnits=(encoded.width||0)*1000/size;
+ // A longer replacement would run into the next text run; fall back to drawing.
+ if(widthUnits>total+.01)return null;
+ const adjust=Math.round((widthUnits-total)*1000)/1000;
+ const inner=encoded.show?encoded.show.replace(/^\[/,'').replace(/\]\s*TJ$/,''):`<${encoded.hex}>`;
+ const prefix=first.slot.operation.op==="'"?`T* `:first.slot.operation.op==='"'?`${number(first.slot.state.word)} Tw ${number(first.slot.state.spacing)} Tc T* `:'';
+ return `${prefix}[${inner}${Math.abs(adjust)>=.01?` ${number(adjust)}`:''}] TJ`;
+}
+// Removing a show operation shifts every later run on the same line, so the
+// remaining advance has to be written somehow. When the next operator starts a
+// fresh line (or the text object ends) nothing depends on the pen position, and
+// the operation can simply disappear — which leaves no deleted-text trace.
+const LINE_RESETS=new Set(['T*','Td','TD','Tm',"'",'"','ET','BT']);
+function deletable(slot){
+ const operations=slot.node.operations||[];
+ const index=operations.indexOf(slot.operation);
+ if(index<0)return false;
+ for(let i=index+1;i<operations.length;i++){
+  const op=operations[i].op;
+  if(['Tj','TJ',"'",'"'].includes(op))return false;
+  // Path and colour operators do not move the pen but do not start a new
+  // line either, so only explicit line resets make removal safe.
+  if(LINE_RESETS.has(op))return true;
+ }
+ return true;
+}
+function buildTree(source,resources,state,context,L,slots,ancestors=[],depth=0){if(depth>30)throw new Error('PDF form nesting is too deep.');const node={source,resources,patches:[],forms:[]};let current={...state},saves=[];node.operations=parseContent(source);for(const operation of node.operations){const a=operation.args;if(operation.op==='q')saves.push({...current});else if(operation.op==='Q')current=saves.pop()||current;else if(operation.op==='Tf'){const fonts=lookup(resources,'Font',L),key=a[0]?.value;const fontObject=fonts?.get(L.PDFName.of(key||''));current={...current,fontObject,fontDict:fontObject?context.lookup(fontObject,L.PDFDict):null,size:a[1]?.value}}else if(operation.op==='Tc')current.spacing=a[0]?.value;else if(operation.op==='Tw')current.word=a[0]?.value;else if(operation.op==='gs'){const ext=lookup(resources,'ExtGState',L),g=ext?.lookupMaybe(L.PDFName.of(a[0]?.value||''),L.PDFDict),font=g?.lookupMaybe(L.PDFName.of('Font'),L.PDFArray);if(font)current={...current,fontObject:font.get(0),fontDict:context.lookup(font.get(0),L.PDFDict),size:font.lookup(1,L.PDFNumber).asNumber()}}else if(['Tj','TJ',"'",'"'].includes(operation.op)){if(operation.op==='"'){current.word=a[0]?.value;current.spacing=a[1]?.value}if(!current.fontObject)throw new Error('PDF text has no resolvable font resource.');slots.push({node,operation,state:{...current},fontObject:current.fontObject,fontDict:current.fontDict})}else if(operation.op==='Do'){const xobjects=lookup(resources,'XObject',L),key=L.PDFName.of(a[0]?.value||''),ref=xobjects?.get(key),object=ref?context.lookup(ref):null;if(object instanceof L.PDFStream&&object.dict.get(L.PDFName.of('Subtype'))?.toString()==='/Form'){if(ancestors.includes(object))throw new Error('Recursive PDF form cannot be safely edited.');const childResources=lookup(object.dict,'Resources',L)||resources;const child=buildTree(ascii(getDecoded(object,L)),childResources,{...current},context,L,slots,[...ancestors,object],depth+1);node.forms.push({operation,object,child})}}}return node}
 function applyPatches(source,patches){let text=source;for(const p of [...patches].sort((a,b)=>b.start-a.start))text=text.slice(0,p.start)+p.text+text.slice(p.end);return text}
-function saveTree(node,context,L,counter){let resources=null;const patches=[...node.patches];for(const form of node.forms){const child=saveTree(form.child,context,L,counter);if(!child.changed)continue;if(!resources)resources=cloneResources(node.resources,context,L);const dict=form.object.dict.clone(context);dict.delete(L.PDFName.of('Filter'));dict.delete(L.PDFName.of('DecodeParms'));dict.delete(L.PDFName.of('Length'));dict.set(L.PDFName.of('Resources'),child.resources||form.child.resources);const stream=context.flateStream(bytes(child.source));for(const [key,value] of dict.entries())stream.dict.set(key,value);const ref=context.register(stream),xs=lookup(resources,'XObject',L);let name;do{name=L.PDFName.of(`PSEditForm${++counter.value}`)}while(xs.has(name));xs.set(name,ref);patches.push({start:form.operation.start,end:form.operation.end,text:`${name.toString()} Do`})}return {changed:patches.length>0,source:applyPatches(node.source,patches),resources}}
+function saveTree(node,context,L,counter){let resources=null;const patches=[...node.patches];for(const form of node.forms){const child=saveTree(form.child,context,L,counter);if(!child.changed)continue;if(!resources)resources=cloneResources(node.resources,context,L);const dict=form.object.dict.clone(context);dict.delete(L.PDFName.of('Filter'));dict.delete(L.PDFName.of('DecodeParms'));dict.delete(L.PDFName.of('Length'));dict.set(L.PDFName.of('Resources'),child.resources||form.child.resources);const stream=context.flateStream(bytes(child.source));for(const [key,value] of dict.entries())stream.dict.set(key,value);const ref=context.register(stream),xs=lookup(resources,'XObject',L);const name=freshName(xs,'Fm',counter,L);xs.set(name,ref);patches.push({start:form.operation.start,end:form.operation.end,text:`${name.toString()} Do`})}return {changed:patches.length>0,source:applyPatches(node.source,patches),resources}}
 export function originalMissingChars(map,text){return [...new Set(Array.from(String(text??'').replace(/[\r\n]/g,'')))].filter(char=>!map?.has(char))}
 function originalEncoder(map,text,size){let encoded=[],width=0,count=0;const keys=[...map.keys()].sort((a,b)=>b.length-a.length);for(let i=0;i<text.length;){let match=keys.find(k=>text.startsWith(k,i));if(!match)throw new Error(`The original font cannot encode ${JSON.stringify(text[i])}. Choose an available font or load a TTF/OTF font; no image conversion was performed.`);const item=map.get(match);encoded.push(item.bytes);width+=item.unitWidth*size;count++;i+=match.length}return {hex:hex(concatenate(encoded)),width,count}}
 function standardName(block){const family=block.font==='original'?block.fallback:block.font;if(/Times|Georgia/.test(family))return block.bold?(block.italic?'Times-BoldItalic':'Times-Bold'):(block.italic?'Times-Italic':'Times-Roman');const mono=/Courier/.test(family),root=mono?'Courier':'Helvetica';return root+(block.bold?(block.italic?'-BoldOblique':'-Bold'):(block.italic?'-Oblique':''))}
@@ -68,7 +126,7 @@ export async function inspectSignatureProtection(original,L){
   return {locked:true,signed:false,count:0,unknown:true,reason:encrypted?'encrypted':!L?.PDFDocument?'library':'parse'};
  }
 }
-export async function exportNativePdf({original,edits,getPage,fonts=new Map(),originalFonts=new Map(),PDFLib:L,fontkit,metadataRecord=null,uploadedMetadata=null,fileId=null,onProgress=()=>{}}){
+export async function exportNativePdf({original,edits,getPage,fonts=new Map(),originalFonts=new Map(),documentFonts=new Map(),PDFLib:L,fontkit,metadataRecord=null,uploadedMetadata=null,fileId=null,attachProvenance=false,onProgress=()=>{}}){
  const changes=[...edits.values()];
  if(!changes.length&&!uploadedMetadata){
   if(!fileId)return original.slice();
@@ -77,5 +135,51 @@ export async function exportNativePdf({original,edits,getPage,fonts=new Map(),or
   try{const untouched=await L.PDFDocument.load(original.slice(),{updateMetadata:false});if(sameFileId(fileId,fileIdFromDocument(untouched,L)))return original.slice();applyFileId(untouched,fileId,L);return await untouched.save({useObjectStreams:true,addDefaultPage:false})}
   catch{return original.slice()}
  }
- let output;try{output=await L.PDFDocument.load(original.slice(),{updateMetadata:false})}catch(error){throw new Error('This PDF cannot be safely rewritten as native content. Open an unlocked PDF first. No image conversion was performed.')}if(signatureProtectionForDocument(output,L).locked)throw new Error('Signature protection is mandatory. This PDF contains a digital signature and cannot be edited. Export the original unchanged or have the issuer sign a new document.');const savedMetadata=capturePdfMetadata(output,L);if(fontkit)output.registerFontkit(fontkit);const context=output.context,fontCache=new Map(),counter={value:0},pages=[...new Set(changes.map(b=>b.page))];for(const n of pages){onProgress(`Exporting native text on page ${n}…`);const page=output.getPage(n-1),data=await getPage(n),pageChanges=changes.filter(b=>b.page===n);let resources=cloneResources(page.node.Resources(),context,L);const slots=[],needsRemoval=pageChanges.some(b=>b.ops?.length),source=collectContent(page.node.get(L.PDFName.of('Contents')),context,L),tree=needsRemoval?buildTree(source,resources,{size:0,spacing:0,word:0,fontObject:null,fontDict:null},context,L,slots):{source,resources,patches:[],forms:[]};const ops=data.info.ops;if(needsRemoval&&slots.length!==ops.length)throw new Error(`Page ${n} has a text structure that cannot be mapped safely. No image conversion was performed.`);const byIndex=new Map(),fontMaps=new Map();if(needsRemoval){for(let i=0;i<slots.length;i++){const slot=slots[i],info=ops[i];const pair=decodeGlyphs(slot,info,L),map=fontMaps.get(slot.fontDict)||new Map();fontMaps.set(slot.fontDict,map);pair.glyphs.forEach((glyph,j)=>{if(glyph.unicode&&!map.has(glyph.unicode))map.set(glyph.unicode,{bytes:pair.decoded[j],unitWidth:glyph.width*(info.font.fontMatrix?.[0]??.001)})});byIndex.set(info.index,{slot,info,map})}for(const block of pageChanges)for(const index of block.ops||[]){const pair=byIndex.get(index);if(!pair)throw new Error('The selected text operation cannot be safely removed.');pair.slot.node.patches.push({start:pair.slot.operation.start,end:pair.slot.operation.end,text:advanceOnly(pair.slot,pair.info)})}}
-const saved=saveTree(tree,context,L,counter);if(saved.resources)resources=saved.resources;const fontResources=lookup(resources,'Font',L);let drawing='';for(const block of pageChanges){if(block.removed||!block.text)continue;let encoder,fontObject;if(block.font==='original'&&block.ops?.length){const pair=byIndex.get(block.ops[0]),missing=originalMissingChars(pair.map,block.text),original=originalFonts.get(block.fontId)||originalFonts.get(pair.info.fontId),cacheKey=`original:${block.fontId||pair.info.fontId}`;let embedded=missing.length&&original?.data?fontCache.get(cacheKey):null;if(missing.length&&original?.data&&!embedded){try{embedded=await output.embedFont(new Uint8Array(original.data),{subset:true});fontCache.set(cacheKey,embedded)}catch{embedded=null}}if(embedded){fontObject=embedded.ref;const spaceGlyph=original?.parsed?.glyphForCodePoint?.(32),spaceAdvance=pair.map.get(' ')?.unitWidth??(spaceGlyph&&original.parsed.unitsPerEm?spaceGlyph.advanceWidth/original.parsed.unitsPerEm:.25);encoder=(text,size)=>{try{const words=String(text).split(' '),space=spaceAdvance*size,wordGap=size>0?(((block.wordSpacing||0)+(block.spacing||0))*1000/size):0,width=words.filter(word=>word).reduce((total,word)=>total+embedded.widthOfTextAtSize(word,size),0)+Math.max(0,words.length-1)*space;if(words.length===1)return {hex:embedded.encodeText(text).asString(),width,count:Array.from(text).length};const tokens=[];for(let i=0;i<words.length;i++){if(i)tokens.push(number(-spaceAdvance*1000-wordGap));if(words[i])tokens.push(`<${embedded.encodeText(words[i]).asString()}>`)}return {hex:'',width,count:Array.from(text).length,show:`[${tokens.join(' ')}] TJ`}}catch(error){throw new Error(`The original embedded font cannot encode ${JSON.stringify(originalMissingChars(pair.map,text)[0]||'a replacement character')}. Load the full TTF/OTF for this font; no image conversion was performed.`)}}}else{fontObject=pair.slot.fontObject;encoder=(text,size)=>originalEncoder(pair.map,text,size)}}else{const upload=fonts.get(block.font),key=upload?block.font:standardName(block);let font=fontCache.get(key);if(!font){try{font=upload?await output.embedFont(upload.data,{subset:true}):await output.embedFont(key)}catch(error){throw new Error('This font could not be embedded. Load a valid TTF or OTF font; no image conversion was performed.')}fontCache.set(key,font)}fontObject=font.ref;encoder=(text,size)=>{try{return {hex:font.encodeText(text).asString(),width:font.widthOfTextAtSize(text,size),count:Array.from(text).length}}catch(error){throw new Error('This font cannot encode a replacement character. Choose the original font or load a TTF/OTF font; no image conversion was performed.')}}}let name;do{name=L.PDFName.of(`PSEditFont${++counter.value}`)}while(fontResources.has(name));fontResources.set(name,fontObject);drawing+=drawNative(block,encoder,name.toString(),data.vp)}page.node.set(L.PDFName.of('Resources'),resources);const contents=saved.changed?saved.source:tree.source;const stream=context.flateStream(bytes(`q\n${contents}\nQ\n${drawing}`));page.node.set(L.PDFName.of('Contents'),context.register(stream))}if(uploadedMetadata)applyUploadedMetadata(output,uploadedMetadata,L);else{await attachSourceMetadata(output,metadataRecord,L);restorePdfMetadata(output,L,savedMetadata)}if(fileId)applyFileId(output,fileId,L);return output.save({useObjectStreams:true,addDefaultPage:false})}
+ let output;try{output=await L.PDFDocument.load(original.slice(),{updateMetadata:false})}catch(error){throw new Error('This PDF cannot be safely rewritten as native content. Open an unlocked PDF first. No image conversion was performed.')}if(signatureProtectionForDocument(output,L).locked)throw new Error('Signature protection is mandatory. This PDF contains a digital signature and cannot be edited. Export the original unchanged or have the issuer sign a new document.');const savedMetadata=capturePdfMetadata(output,L);if(fontkit)output.registerFontkit(fontkit);const context=output.context,fontCache=new Map(),counter={value:0},pages=[...new Set(changes.map(b=>b.page))];for(const n of pages){onProgress(`Exporting native text on page ${n}…`);const page=output.getPage(n-1),data=await getPage(n),pageChanges=changes.filter(b=>b.page===n);let resources=cloneResources(page.node.Resources(),context,L);const slots=[],needsRemoval=pageChanges.some(b=>b.ops?.length),source=collectContent(page.node.get(L.PDFName.of('Contents')),context,L),tree=needsRemoval?buildTree(source,resources,{size:0,spacing:0,word:0,fontObject:null,fontDict:null},context,L,slots):{source,resources,patches:[],forms:[]};const ops=data.info.ops;if(needsRemoval&&slots.length!==ops.length)throw new Error(`Page ${n} has a text structure that cannot be mapped safely. No image conversion was performed.`);const byIndex=new Map(),fontMaps=new Map(),inPlace=new Set();if(needsRemoval){for(let i=0;i<slots.length;i++){const slot=slots[i],info=ops[i];const pair=decodeGlyphs(slot,info,L),map=fontMaps.get(slot.fontDict)||new Map();fontMaps.set(slot.fontDict,map);pair.glyphs.forEach((glyph,j)=>{if(glyph.unicode&&!map.has(glyph.unicode))map.set(glyph.unicode,{bytes:pair.decoded[j],unitWidth:glyph.width*(info.font.fontMatrix?.[0]??.001)})});byIndex.set(info.index,{slot,info,map})}for(const block of pageChanges){
+   const pairs=(block.ops||[]).map(index=>byIndex.get(index));
+   if(!pairs.length||pairs.some(pair=>!pair))throw new Error('The selected text operation cannot be safely removed.');
+   const original=(data.blocks||[]).find(entry=>entry.id===block.id);
+   if(!block.removed&&block.text&&sameTextStyle(block,original)){
+    const patched=patchInPlace(pairs,block.text,text=>originalEncoder(pairs[0].map,text,pairs[0].slot.state.size),L);
+    if(patched){
+     pairs[0].slot.node.patches.push({start:pairs[0].slot.operation.start,end:pairs[0].slot.operation.end,text:patched});
+     for(const pair of pairs.slice(1))pair.slot.node.patches.push({start:pair.slot.operation.start,end:pair.slot.operation.end,text:''});
+     inPlace.add(block.id);
+     continue;
+    }
+   }
+   for(const pair of pairs){
+    const text=pair.slot.operation.op==="'"||pair.slot.operation.op==='"'||!deletable(pair.slot)?advanceOnly(pair.slot,pair.info):'';
+    pair.slot.node.patches.push({start:pair.slot.operation.start,end:pair.slot.operation.end,text});
+   }
+  }}
+const saved=saveTree(tree,context,L,counter);if(saved.resources)resources=saved.resources;const fontResources=lookup(resources,'Font',L);let drawing='';for(const block of pageChanges){if(block.removed||!block.text||inPlace.has(block.id))continue;let encoder,fontObject;if(block.font==='original'&&block.ops?.length){const pair=byIndex.get(block.ops[0]),missing=originalMissingChars(pair.map,block.text),original=originalFonts.get(block.fontId)||originalFonts.get(pair.info.fontId),cacheKey=`original:${block.fontId||pair.info.fontId}`;let embedded=missing.length&&original?.data?fontCache.get(cacheKey):null;if(missing.length&&original?.data&&!embedded){try{embedded=await output.embedFont(new Uint8Array(original.data),{subset:true});fontCache.set(cacheKey,embedded)}catch{embedded=null}}if(embedded){fontObject=embedded.ref;const spaceGlyph=original?.parsed?.glyphForCodePoint?.(32),spaceAdvance=pair.map.get(' ')?.unitWidth??(spaceGlyph&&original.parsed.unitsPerEm?spaceGlyph.advanceWidth/original.parsed.unitsPerEm:.25);encoder=(text,size)=>{try{const words=String(text).split(' '),space=spaceAdvance*size,wordGap=size>0?(((block.wordSpacing||0)+(block.spacing||0))*1000/size):0,width=words.filter(word=>word).reduce((total,word)=>total+embedded.widthOfTextAtSize(word,size),0)+Math.max(0,words.length-1)*space;if(words.length===1)return {hex:embedded.encodeText(text).asString(),width,count:Array.from(text).length};const tokens=[];for(let i=0;i<words.length;i++){if(i)tokens.push(number(-spaceAdvance*1000-wordGap));if(words[i])tokens.push(`<${embedded.encodeText(words[i]).asString()}>`)}return {hex:'',width,count:Array.from(text).length,show:`[${tokens.join(' ')}] TJ`}}catch(error){throw new Error(`The original embedded font cannot encode ${JSON.stringify(originalMissingChars(pair.map,text)[0]||'a replacement character')}. Load the full TTF/OTF for this font; no image conversion was performed.`)}}}else{fontObject=pair.slot.fontObject;encoder=(text,size)=>originalEncoder(pair.map,text,size)}}else if(documentFonts.has(block.font)&&!fonts.get(block.font)){
+ // Reuse the font dictionary that is already in this PDF (normally the page-1
+ // program) instead of embedding the program a second time: the edited page's
+ // /Font resource points at the existing object and the text is written with
+ // that font's own codes.
+ const plan=documentFonts.get(block.font),donorPage=output.getPage(Math.max(0,(plan?.page||1)-1));
+ const donorFonts=lookup(donorPage.node.Resources(),'Font',L),ref=donorFonts?.get(L.PDFName.of(plan?.resourceName||''));
+ const donorFont=ref?readDocumentFont(ref,context,L):null;
+ if(!donorFont)throw new Error(`The document font for page ${plan?.page||1} could not be reused. Choose another font for this text.`);
+ // The shared naming step below registers this page's font resource; it points
+ // at the donor object itself, so nothing is re-embedded.
+ fontObject=ref;
+ encoder=documentFontEncoder(donorFont,{wordSpacing:block.wordSpacing||0});
+}else{const upload=fonts.get(block.font),key=upload?block.font:standardName(block);let font=fontCache.get(key);if(!font){try{font=upload?await output.embedFont(upload.data,{subset:true}):await output.embedFont(key)}catch(error){throw new Error('This font could not be embedded. Load a valid TTF or OTF font; no image conversion was performed.')}fontCache.set(key,font)}fontObject=font.ref;encoder=(text,size)=>{try{return {hex:font.encodeText(text).asString(),width:font.widthOfTextAtSize(text,size),count:Array.from(text).length}}catch(error){throw new Error('This font cannot encode a replacement character. Choose the original font or load a TTF/OTF font; no image conversion was performed.')}}}const reused=existingName(fontResources,fontObject);
+ const name=reused||freshName(fontResources,'F',counter,L);
+ if(!reused)fontResources.set(name,fontObject);
+ drawing+=drawNative(block,encoder,name.toString(),data.vp)}if(drawing||saved.resources)page.node.set(L.PDFName.of('Resources'),resources);
+  const contents=saved.changed?saved.source:tree.source;
+  // With no new drawing there is no need for a graphics-state wrapper; writing
+  // the patched stream as-is keeps the page looking untouched.
+  const body=drawing?`q\n${contents}\nQ\n${drawing}`:contents;
+  page.node.set(L.PDFName.of('Contents'),context.register(context.flateStream(bytes(body))))}if(uploadedMetadata)applyUploadedMetadata(output,uploadedMetadata,L);else{
+  // A provenance attachment points at another document, which is exactly what a
+  // "re-saved copy of another PDF" check looks for. It is opt-in only.
+  if(attachProvenance)await attachSourceMetadata(output,metadataRecord,L);
+  restorePdfMetadata(output,L,savedMetadata)}if(fileId)applyFileId(output,fileId,L);
+ // The header written by the PDF library is 1.7; a catalog /Version left at
+ // 1.4 would describe the file as an older document than its own structure.
+ ensureCatalogVersion(output,'1.7',L);
+ return output.save({useObjectStreams:true,addDefaultPage:false})}

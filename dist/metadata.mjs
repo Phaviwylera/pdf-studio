@@ -28,19 +28,17 @@ export function parseUploadedMetadata(data, filename) {
 const TEXT_FIELDS = new Set(['Title', 'Author', 'Subject', 'Keywords', 'Creator', 'Producer']);
 const INFO_TYPES = 'text, a number, a boolean or a PDF name';
 
-// Source sidecar reports describe the original file. Their values are preserved
-// as custom PDF Info fields with an explicit Source prefix, because a PDF Info
-// dictionary has no standard field for a filename, hash, page count or version.
-const SIDECAR_METADATA_FIELDS = new Map([
- ['version', 'SourcePDFVersion'],
- ['pages', 'SourcePageCount'],
- ['encrypted', 'SourceEncrypted'],
- ['decrypted', 'SourceDecrypted'],
-]);
+// Source sidecar reports describe the original file: its name, size, hashes,
+// page count, version and encryption state. None of that is editable PDF
+// metadata, and writing it into Info as Source* fields makes the export look
+// like a re-saved copy of another document to validators. The values are
+// validated for shape, then ignored.
+const SIDECAR_METADATA_FIELDS = new Set(['version', 'pages', 'encrypted', 'decrypted', 'signed', 'linearized', 'language']);
 
-function sourceFieldName(key) {
- const cleaned = String(key).replace(/[^A-Za-z0-9]+/g, '');
- return `Source${cleaned.replace(/^./, character => character.toUpperCase()) || 'Value'}`;
+// Any Info key that describes where the file came from is not written by this
+// editor, whatever JSON supplied it.
+export function isSourceDescriptor(key) {
+ return /^source(?:[A-Z0-9_.-]|$)/.test(String(key));
 }
 
 function isSidecarReport(value) {
@@ -130,8 +128,7 @@ function parseUploadedMetadataStrict(data, filename) {
   for (const [key, value] of Object.entries(parsed.metadata || {})) {
    const path = `metadata.${key}`;
    if (value === null) continue;
-   const mapped = SIDECAR_METADATA_FIELDS.get(key);
-   if (mapped) addField(mapped, value, true, path);
+   if (SIDECAR_METADATA_FIELDS.has(key)) ignored.push(`metadata.${key}`);
    else addField(key, value, false, path);
   }
   if (parsed.file !== undefined) {
@@ -144,12 +141,10 @@ function parseUploadedMetadataStrict(data, filename) {
      for (const [algorithm, digest] of Object.entries(value)) {
       if (digest === null) continue;
       if (typeof digest !== 'string') { problems.push(`PDF Info hash "${path}.${algorithm}" must be text; received ${describeJsonValue(digest)}.`); continue; }
-      addField(sourceFieldName(algorithm), digest, true, `${path}.${algorithm}`);
+      ignored.push(`file.hashes.${algorithm}`);
      }
-    } else if (key === 'name') addField('SourceFilename', value, true, path);
-    else if (key === 'sizeBytes') addField('SourceFileSizeBytes', value, true, path);
-    else if (plainObject(value) || Array.isArray(value)) problems.push(`PDF Info field "${path}" must be ${INFO_TYPES}; received ${describeJsonValue(value)}.`);
-    else addField(sourceFieldName(key), value, true, path);
+    } else if (plainObject(value) || Array.isArray(value)) problems.push(`PDF Info field "${path}" must be ${INFO_TYPES}; received ${describeJsonValue(value)}.`);
+    else ignored.push(path);
    }
   }
  } else for (const [key, value] of Object.entries(rawInfo)) {
@@ -264,6 +259,8 @@ export async function attachSourceMetadata(document, record, L) {
 export function applyUploadedMetadata(document, upload, L) {
  const context = document.context, info = context.obj({});
  for (const field of upload.fields) {
+  // Defensive: a hand-written JSON may still contain Source* descriptor keys.
+  if (isSourceDescriptor(field.key)) continue;
   let value;
   if (field.type === 'text' || field.type === 'string') value = L.PDFHexString.fromText(field.value);
   else if (field.type === 'date') value = field.value.startsWith('D:') ? L.PDFString.of(field.value) : L.PDFString.fromDate(new Date(field.value));

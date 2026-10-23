@@ -86,3 +86,45 @@ test('file identifier dialog restores the original /ID into exports', async () =
  assert.match(app, /signPdfCopy\(\{bytes,sourceBytes:uploadedOriginal,credential,PDFLib,forge:window\.forge,fileId\}\)/);
  assert.match(app, /encryptPdfCopy\(\{bytes,password,ownerPassword,metadataFile:metadataPayload,fileId:await readPdfFileId/);
 });
+
+test('the Fonts dialog reports page-1 programs and reuses them on every page', async () => {
+ const html = await read('../dist/index.html');
+ const app = await read('../dist/app.mjs');
+ assert.match(html, /id="fontid" disabled>Fonts</);
+ assert.match(html, /id="fontid-dialog"/);
+ assert.match(html, /id="fontid-info" class="fingerprint-output"/);
+ assert.match(html, /id="fontid-status" role="status"/);
+ assert.match(html, /id="fontid-clear" disabled/);
+ assert.match(app, /import \{buildDocumentFontInventory, fontKey, formatFontInventory\} from '\.\/font-inventory\.mjs'/);
+ assert.match(app, /const fontProgramPool=new Map\(\)/);
+ assert.match(app, /const documentFontOptions=\[\]/);
+ assert.match(app, /async function loadDocumentFonts\(\)/);
+ assert.match(app, /await loadDocumentFonts\(\);\n/);
+ assert.match(app, /async function primeDocumentFonts\(inventory\)/);
+ assert.match(app, /async function poolProgram\(key,data,page,baseFont\)/);
+ assert.match(app, /function applyProgramDonor\(record,page\)/);
+ assert.match(app, /function documentFontForBlock\(block,text\)/);
+ assert.match(app, /function documentFontForPage\(page\)/);
+ assert.match(app, /\$\('fontid'\)\.onclick=openFontDialog/);
+ assert.match(app, /\$\('fontid'\)\.disabled=!doc\|\|busy\|\|metadataLoading/);
+ assert.match(app, /const docFont=documentFontOptions\[0\]/);
+ assert.match(app, /document font\$?\{?.*available on every page/);
+});
+
+test('document fonts are exported by reusing their existing font dictionary', async () => {
+ const app = await read('../dist/app.mjs');
+ const exporter = await read('../dist/native-export.mjs');
+ const font = await read('../dist/document-font.mjs');
+ assert.match(app, /function documentFontPlans\(\)/);
+ assert.match(app, /function donorResourceName\(inventory,font,page\)/);
+ assert.match(app, /metadataRecord:sourceMetadata,uploadedMetadata,fileId,documentFonts:documentFontPlans\(\),onProgress:status/);
+ assert.match(app, /metadataRecord:sourceMetadata,uploadedMetadata,documentFonts:documentFontPlans\(\),fileId:activeFileId\(\)\}/);
+ assert.match(exporter, /import \{readDocumentFont, documentFontEncoder\} from '\.\/document-font\.mjs'/);
+ assert.match(exporter, /documentFonts=new Map\(\)/);
+ assert.match(exporter, /else if\(documentFonts\.has\(block\.font\)&&!fonts\.get\(block\.font\)\)/);
+ assert.match(exporter, /fontObject=ref;/);
+ assert.match(font, /export function parseToUnicode\(text\)/);
+ assert.match(font, /export function parseCidWidths\(descendant, context, L\)/);
+ assert.match(font, /export function readDocumentFont\(ref, context, L\)/);
+ assert.match(font, /export function documentFontEncoder\(font, \{wordSpacing = 0\} = \{\}\)/);
+});

@@ -202,33 +202,33 @@ const sidecar = {
  },
 };
 
-test('sidecar file reports become native Info fields plus Source custom fields', () => {
+test('sidecar file reports apply native Info fields and drop source descriptors', () => {
  const parsed = upload(JSON.stringify(sidecar));
  assert.equal(parsed.format, 'sidecar');
+ // Only real PDF metadata is written. Source-side details (file name, size,
+ // hashes, version, encryption) stay out of Info so the export is not a copy.
  assert.deepEqual(parsed.fields, [
-  {key: 'SourcePDFVersion', type: 'string', value: '1.4'},
-  {key: 'SourcePageCount', type: 'number', value: 15},
-  {key: 'SourceEncrypted', type: 'boolean', value: true},
   {key: 'Producer', type: 'text', value: 'openhtmltopdf.com'},
   {key: 'CreationDate', type: 'date', value: "D:20261017110332+05'30'"},
-  {key: 'SourceDecrypted', type: 'boolean', value: true},
-  {key: 'SourceFilename', type: 'string', value: '62271XXXX_DownloadStatement_1792215212.pdf'},
-  {key: 'SourceFileSizeBytes', type: 'number', value: 583255},
-  {key: 'SourceSHA1', type: 'string', value: 'e0cd0b32f7b3d19faac9055724e63d4344bc84b4'},
-  {key: 'SourceSHA256', type: 'string', value: '5ed8fb71a4dbbf699ffc40f1b2f27a250dd4fe02c0dfed1dd00b00b929ebde21'},
  ]);
  assert.equal(parsed.xmpRaw, null);
+ assert.ok(parsed.ignored.includes('file.name'));
+ assert.ok(parsed.ignored.includes('file.sizeBytes'));
+ assert.ok(parsed.ignored.includes('file.hashes.SHA-256'));
+ assert.ok(parsed.ignored.includes('metadata.version'));
 });
 
-test('sidecar values are written to the exported PDF Info without an attachment', async () => {
+test('sidecar values write only real Info fields, with no source descriptors', async () => {
  const original = await source();
  const out = await exportNativePdf({original, edits: new Map(), PDFLib: L, metadataRecord: {must: 'not attach'}, uploadedMetadata: upload(JSON.stringify(sidecar))});
  const pdf = await L.PDFDocument.load(out, {updateMetadata: false});
  assert.equal(pdf.getProducer(), 'openhtmltopdf.com');
- assert.equal(infoEntries(pdf)['/SourcePageCount'], '15');
- assert.equal(infoEntries(pdf)['/SourceEncrypted'], 'true');
- assert.equal(infoEntries(pdf)['/SourceFilename'], L.PDFHexString.fromText(sidecar.file.name).toString());
- assert.equal(infoEntries(pdf)['/SourceSHA256'], L.PDFHexString.fromText(sidecar.file.hashes['SHA-256']).toString());
+ const entries = infoEntries(pdf);
+ assert.equal(entries['/SourcePageCount'], undefined);
+ assert.equal(entries['/SourceEncrypted'], undefined);
+ assert.equal(entries['/SourceFilename'], undefined);
+ assert.equal(entries['/SourceSHA256'], undefined);
+ assert.equal(Object.keys(entries).filter(key => /^\/Source/i.test(key)).length, 0, 'no Source* Info keys');
  assert.equal(pdf.catalog.get(key('Names')), undefined);
  assert.equal(xmpXml(pdf), null);
 });

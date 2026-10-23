@@ -16,10 +16,10 @@ export function validateExportPasswords({password = '', confirmation = '', owner
   throw new Error('The open password and its confirmation do not match.');
  }
  if (ownerPassword && (typeof ownerPassword !== 'string' || ownerPassword.length < MIN_EXPORT_PASSWORD_LENGTH)) {
-  throw new Error('The owner password must have at least 8 characters, or be left blank to use the open password.');
+  throw new Error('The owner password must have at least 8 characters, or be left blank to use a generated one.');
  }
  if (ownerPassword && ownerPassword === password) {
-  throw new Error('Choose a different owner password, or leave it blank to use the open password.');
+  throw new Error('Choose a different owner password, or leave it blank to use a generated one.');
  }
  return {password, ownerPassword};
 }

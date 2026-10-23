@@ -94,7 +94,7 @@ test('no-edit export is byte-for-byte unchanged, without any attachment', async 
  assert.deepEqual(result, bytes);
 });
 
-test('edited export retains original Info/XMP and embeds downloadable source JSON', async () => {
+test('edited export retains original Info/XMP without a provenance attachment', async () => {
  const {bytes, xml} = await fixture();
  const before = await L.PDFDocument.load(bytes, {updateMetadata: false});
  const out = await exportNativePdf({original: bytes, edits: newText('New text'), PDFLib: L, metadataRecord: record, getPage});
@@ -102,8 +102,18 @@ test('edited export retains original Info/XMP and embeds downloadable source JSO
  const after = await L.PDFDocument.load(out, {updateMetadata: false});
  assert.deepEqual(infoEntries(after), infoEntries(before));
  assert.equal(xmpXml(after), xml);
- assert.equal(attachment(after, METADATA_ATTACHMENT), metadataJson(record));
+ // An embedded source record makes the file look like a re-saved copy, so the
+ // export carries none unless the caller explicitly opts in.
+ assert.equal(after.catalog.get(name('Names')), undefined);
+ assert.equal(decoder.decode(out).includes('pdf-studio-source-metadata'), false);
  assert.equal(after.getPageCount(), 1);
+});
+
+test('the provenance attachment is only written when explicitly requested', async () => {
+ const {bytes} = await fixture();
+ const out = await exportNativePdf({original: bytes, edits: newText('New text'), PDFLib: L, metadataRecord: record, getPage, attachProvenance: true});
+ const after = await L.PDFDocument.load(out, {updateMetadata: false});
+ assert.equal(attachment(after, METADATA_ATTACHMENT), metadataJson(record));
 });
 
 test('editing a PDF without Info or XMP does not invent either metadata field', async () => {
@@ -115,14 +125,14 @@ test('editing a PDF without Info or XMP does not invent either metadata field', 
  const edited = await L.PDFDocument.load(out, {updateMetadata: false});
  assert.equal(edited.context.trailerInfo.Info, undefined);
  assert.equal(edited.catalog.get(name('Metadata')), undefined);
- assert.equal(attachment(edited, METADATA_ATTACHMENT), metadataJson(record));
+ assert.equal(edited.catalog.get(name('Names')), undefined);
 });
 
-test('re-editing a PDF retains prior provenance and uses a distinct attachment name', async () => {
+test('re-editing an opted-in provenance attachment uses a distinct attachment name', async () => {
  const {bytes} = await fixture();
- const first = await exportNativePdf({original: bytes, edits: newText('First'), PDFLib: L, metadataRecord: record, getPage});
+ const first = await exportNativePdf({original: bytes, edits: newText('First'), PDFLib: L, metadataRecord: record, getPage, attachProvenance: true});
  const secondRecord = {...record, source: {...record.source, filename: 'first-edited.pdf'}};
- const second = await exportNativePdf({original: first, edits: newText('Second'), PDFLib: L, metadataRecord: secondRecord, getPage});
+ const second = await exportNativePdf({original: first, edits: newText('Second'), PDFLib: L, metadataRecord: secondRecord, getPage, attachProvenance: true});
  const pdf = await L.PDFDocument.load(second, {updateMetadata: false});
  assert.equal(attachment(pdf, METADATA_ATTACHMENT), metadataJson(record));
  assert.equal(attachment(pdf, 'pdf-studio-source-metadata-2.json'), metadataJson(secondRecord));
