@@ -1,6 +1,6 @@
 # PDF Studio
 
-Browser-local PDF text editing with continuous scrolling, native-text export with an optional AES-256 password-protected copy, password-protected PDF decryption in WebAssembly, source metadata inspection and optional replacement, standalone AES-256 PDF encryption with optional JSON-based native metadata replacement, fixed-decimal alignment, per-text X/Y position locks, trailer `/ID` preservation with manual restore, SHA-256/SHA-512 fingerprints, and authorized RSA PFX/P12 signing.
+Browser-local PDF text editing with continuous scrolling, a statement arithmetic check with one-click balance fixes, native-text export with an optional AES-256 password-protected copy, password-protected PDF decryption in WebAssembly, source metadata inspection and optional replacement, standalone AES-256 PDF encryption with optional JSON-based native metadata replacement, fixed-decimal alignment, per-text X/Y position locks, trailer `/ID` preservation with manual restore, SHA-256/SHA-512 fingerprints, and authorized RSA PFX/P12 signing.
 
 Live app: https://pdf-studio.phavithiranofficial.chatgpt.site
 
@@ -96,6 +96,21 @@ PDF Studio captures the `/ID` pair from the bytes you upload, before any in-brow
 
 Restoring the identifier does not restore the original fingerprint: text edits, metadata replacement, encryption and re-saving all change the file bytes, so SHA-256/SHA-512 differ. It only makes the document identifier match again.
 
+## Statement check
+
+**Statement check** in the header reads every page, groups text that shares a baseline into rows, and checks the arithmetic a reader would check:
+
+- **Running balance.** Each row's balance must equal the previous balance plus its amount (Cr positive, Dr negative). The opening balance is taken from an opening row, or — when the first row carries an amount — from that row's balance minus its amount, using the values before any edit.
+- **Closing total.** The last balance minus the opening balance must equal credits minus debits.
+- **Date order.** A row dated earlier than the row above it is reported as suspicious.
+- **Direction per narration code.** A code such as `UPAR`, `NEFT` or `IMPS` keeps one direction across a statement; a row whose Dr/Cr contradicts the code's usual direction is reported, with the count it contradicts.
+
+Repeated page headers, "Page 3 of 24" lines and column titles are not transactions: rows without a date that repeat on more than one page are counted once.
+
+**Fix balances** rewrites only the balance cells that no longer follow from the amounts — the amounts stay as typed — using the same currency prefix, thousands separator, decimal places and Dr/Cr or parenthesis style as the cell it replaces. It records one undo step, refreshes the report, and marks the export as changed. Nothing is uploaded, saved or sent.
+
+`dist/statement-check.mjs` is pure and testable without a browser: `parseAmount`, `parseDate`, `formatAmountLike`, `groupRows`, `classifyRow`, `narrationCode`, `extractStatementRows`, `checkStatement`, `formatReport`.
+
 ## Source metadata
 
 After opening a PDF, click **Metadata** to inspect and download a JSON record of its native PDF Info fields (including custom fields) and XMP XML, when available. Calculated PDF.js document properties are not shown as Info metadata. Without a replacement upload, an edited native export preserves the source PDF's Info dictionary and XMP stream and attaches nothing: the record stays a separate JSON download. An unchanged download remains byte-for-byte original.
@@ -121,7 +136,7 @@ Optionally choose a UTF-8 `.json` metadata file (up to 8 MB) to **replace the PD
 
 Downloads use a blob link appended to the page. After any download the app shows a **Download ready** panel with the filename, size, a **Save again** link, an **Open file** link, and — inside an embedded preview — **Open app in new tab**. Embedded preview frames can block automatic downloads even when the file was created successfully; use that panel or open the app in its own tab and retry there.
 
-Run metadata, typography, export-choice, encryption, decryption, file-identifier, font-inventory, export-fingerprint, hash-fingerprint and module-wiring regression tests with `node --test tests/*.test.mjs` (Node.js required only for tests). Typography tests cover 0.001 pt normalization, glyph-advance layout without kerning, word/letter spacing, paint modes, stroke weight and baseline placement. Syntax-check the runtime and test modules with `node --check dist/*.mjs` and `node --check tests/*.mjs` before running the suite.
+Run metadata, typography, export-choice, encryption, decryption, file-identifier, font-inventory, export-fingerprint, statement-check, hash-fingerprint and module-wiring regression tests with `node --test tests/*.test.mjs` (Node.js required only for tests). Typography tests cover 0.001 pt normalization, glyph-advance layout without kerning, word/letter spacing, paint modes, stroke weight and baseline placement. Syntax-check the runtime and test modules with `node --check dist/*.mjs` and `node --check tests/*.mjs` before running the suite.
 
 ## Protection and signing
 
@@ -142,6 +157,7 @@ New signed copies use an authorized user-provided RSA 2048+ PFX/P12 certificate 
 - `dist/metadata.mjs`: source metadata report, Info/XMP replacement or preservation, and the opt-in provenance attachment.
 - `dist/file-id.mjs`: trailer `/ID` capture, encoding-preserving restore and export verification.
 - `dist/pdf-version.mjs`: header and catalog `/Version` inspection and raising (AES-256 needs 1.7).
+- `dist/statement-check.mjs`: statement row extraction, running-balance and direction checks, and the balance-cell fixes.
 - `dist/font-identity.mjs`: Arial/Helvetica family, style and subset-name recognition.
 - `dist/font-coverage.mjs`: embedded-font character coverage, missing-glyph reporting and mixed font-run selection for canvas previews.
 - `dist/font-inventory.mjs`: per-page `/Font` inventory, typeface identity, page-1 program detection and cross-page reuse.
