@@ -125,9 +125,10 @@ async function pageContent(pdf) {
 
 test('editor registers each embedded program and hands it to native export', async () => {
  const app = await readFile(new URL('../dist/app.mjs', import.meta.url), 'utf8');
- assert.match(app, /async function ensureOriginalFont\(id,font\)/);
+ assert.match(app, /async function ensureOriginalFont\(id,font,page=null\)/);
+ assert.match(app, /async function registerFontProgram\(data\)/);
  assert.match(app, /new FontFace\(family,data\.buffer\.slice\(data\.byteOffset,data\.byteOffset\+data\.byteLength\)\)/);
- assert.match(app, /await ensureOriginalFont\(id,font\)/);
+ assert.match(app, /await ensureOriginalFont\(id,font,n\)/);
  assert.match(app, /exportNativePdf\(\{original,edits,getPage,fonts:loadedFonts,originalFonts,/);
  assert.match(app, /originalFonts\.clear\(\)/);
  const exporter = await readFile(new URL('../dist/native-export.mjs', import.meta.url), 'utf8');

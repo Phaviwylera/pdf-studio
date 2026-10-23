@@ -51,6 +51,25 @@ When a PDF embeds a font program, the editor registers that program for the docu
 
 Most PDF producers embed only a **subset** of the font — the glyphs actually used somewhere in that document. Characters that are absent from the subset cannot be drawn with the original font; the editor then names the missing characters and uses a substitute for the edit (or a loaded TTF/OTF) rather than exporting blank glyphs. To recover those characters, load the full TTF/OTF in **Available font → Load font file** and choose **Best font match**. Standard PDF fonts without an embedded program (Helvetica, Times, Courier) use the bundled standard-font program that PDF.js loads (Liberation in this build) for typed text, with family substitutes only when a character is absent.
 
+### Fonts across all pages
+
+Opening a PDF now builds a document-wide font inventory from every page's `/Font` resources. Fonts are grouped by typeface identity — the subset tag (`ABCDEF+`) and producer-generated numeric suffixes are ignored — so one entry can cover pages 1–24 even when each page embeds a different subset.
+
+- The earliest page that embeds a font program becomes the **donor** for that typeface, normally page 1. Any later page that uses the same typeface without its own program reuses the donor's program for the canvas preview and for native export, so editing page 12 keeps the document's own typeface instead of a browser substitute.
+- Fonts found anywhere in the document appear in **Available font** as `Family — page N (document font)` and can be applied to text on any page. New text added with **+ Add text** starts in the document's own font when one is available.
+- **Fonts** in the header opens the inventory: typefaces, subtype, embedded or not, the pages that use each one, and the program's donor page. The dialog also states what the current page will use.
+- When a page has no program and no donor exists, the existing behaviour is unchanged: the edit uses the observed glyph map if it covers the text, otherwise a standard-family substitute, and the message names the missing characters.
+
+The same inventory is available without a browser:
+
+```sh
+node tools/font-report.mjs statement.pdf            # human-readable report
+node tools/font-report.mjs statement.pdf --page 4   # add the fonts used on page 4
+node tools/font-report.mjs statement.pdf --json     # machine-readable summary
+```
+
+Reuse is inside one document and never re-embeds the font: the edited page's `/Font` resource points at the font dictionary that already exists in the PDF (usually page 1's), and the text is written with that font's own character codes from its `ToUnicode` CMap, with advances taken from its `/W` widths. The exported file therefore keeps byte-identical font data, adds no second subset, and gains no substitute family. Characters that the reused font does not map are named in the export error so you can load the full TTF/OTF; nothing is uploaded.
+
 ## File identifier (/ID)
 
 A PDF trailer can carry an array of two byte strings: the **permanent** identifier created with the file and the **changing** identifier rewritten whenever the file is saved. Rewrite tools — qpdf decryption in this app, other editors, print-to-PDF — often replace that pair or change its literal/hexadecimal encoding, which makes downstream file-identity checks report `ID_CHANGED` even when the text edits themselves are correct.
@@ -89,7 +108,7 @@ Optionally choose a UTF-8 `.json` metadata file (up to 8 MB) to **replace the PD
 
 Downloads use a blob link appended to the page. After any download the app shows a **Download ready** panel with the filename, size, a **Save again** link, an **Open file** link, and — inside an embedded preview — **Open app in new tab**. Embedded preview frames can block automatic downloads even when the file was created successfully; use that panel or open the app in its own tab and retry there.
 
-Run metadata, typography, export-choice, encryption, decryption, file-identifier, fingerprint and module-wiring regression tests with `node --test tests/*.test.mjs` (Node.js required only for tests). Typography tests cover 0.001 pt normalization, glyph-advance layout without kerning, word/letter spacing, paint modes, stroke weight and baseline placement. Syntax-check the runtime and test modules with `node --check dist/*.mjs` and `node --check tests/*.mjs` before running the suite.
+Run metadata, typography, export-choice, encryption, decryption, file-identifier, font-inventory, fingerprint and module-wiring regression tests with `node --test tests/*.test.mjs` (Node.js required only for tests). Typography tests cover 0.001 pt normalization, glyph-advance layout without kerning, word/letter spacing, paint modes, stroke weight and baseline placement. Syntax-check the runtime and test modules with `node --check dist/*.mjs` and `node --check tests/*.mjs` before running the suite.
 
 ## Protection and signing
 
@@ -111,6 +130,9 @@ New signed copies use an authorized user-provided RSA 2048+ PFX/P12 certificate 
 - `dist/file-id.mjs`: trailer `/ID` capture, encoding-preserving restore and export verification.
 - `dist/font-identity.mjs`: Arial/Helvetica family, style and subset-name recognition.
 - `dist/font-coverage.mjs`: embedded-font character coverage, missing-glyph reporting and mixed font-run selection for canvas previews.
+- `dist/font-inventory.mjs`: per-page `/Font` inventory, typeface identity, page-1 program detection and cross-page reuse.
+- `dist/document-font.mjs`: existing font-dictionary reuse, `ToUnicode` code maps, CID widths and the encoder used for the reused font.
+- `tools/font-report.mjs`: command-line font report for a PDF (no browser required).
 - `dist/signing.mjs`: PFX/P12 handling, signed-copy creation and fingerprints.
 - `dist/vendor/`: bundled PDF.js, pdf-lib, fontkit, Forge and supporting assets, plus `pdf-encrypt/` (@pdfsmaller/pdf-encrypt 1.2.0, MIT) for AES-256 PDF security and `qpdf/` (qpdf 11.0.0, Apache-2.0) for in-browser decryption.
 
