@@ -94,7 +94,7 @@ function deletable(slot){
 // the fonts that page already names. Only operators whose value differs from
 // what the producer left in effect are emitted, so the replacement keeps the
 // document's own operator vocabulary.
-function drawInPlace(block,segments,viewport,original,matrixOp=null,matrixPatches=null){
+function drawInPlace(block,segments,viewport,original,matrixOp=null,matrixPatches=null,placement=null){
  const inv=inverse(viewport.transform),lines=block.text.split('\n').filter(line=>line.length);
  if(!lines.length||!segments.length)return null;
  const differs=(key,fallback)=>String(block[key]??fallback)!==String(original?.[key]??fallback);
@@ -118,15 +118,23 @@ function drawInPlace(block,segments,viewport,original,matrixOp=null,matrixPatche
    lineSegments=[{...segments[0],text:line}];
   }
   let cursor=placedStart(block,lineSegments,original);
+  // A run that already has a producer matrix is placed from that matrix, not
+  // from the preview's coordinates: same decimals, same row.
+  const exact=index===0?placement:null;
+  if(exact)cursor=exact.x;
   for(const segment of lineSegments){
    const encoded=segment.encoder(segment.text,block.size);
    if(differs('size',0)||segment.fontName!==original?.fontResourceName)content+=`${segment.fontName} ${number(block.size)} Tf\n`;
    // The producer placed every value with a plain translation matrix. Write the
    // replacement the same way, and write nothing at all when the pen is already
    // there — a second matrix is what makes an edit stand out.
-   const where=index===0&&original&&Math.abs(cursor-Number(original.x))<1e-6&&Math.abs(y-Number(original.y))<1e-6;
+   const where=exact
+    ?Math.abs(exact.x-exact.origin.x)<1e-9&&Math.abs(exact.y-exact.origin.y)<1e-9
+    :(index===0&&original&&Math.abs(cursor-Number(original.x))<1e-6&&Math.abs(y-Number(original.y))<1e-6);
    if(!where){
-    const matrix=`${compose(inv,[1,0,0,-1,cursor,y]).map(number).join(' ')} Tm`;
+    const matrix=exact
+     ?`1 0 0 1 ${number(exact.x)} ${number(exact.y)} Tm`
+     :`${compose(inv,[1,0,0,-1,cursor,y]).map(number).join(' ')} Tm`;
     // The producer already wrote a matrix for this run: give it the new value
     // instead of leaving two, so the object still has one placement.
     if(index===0&&matrixOp&&matrixPatches)matrixPatches.push({start:matrixOp.start,end:matrixOp.end,text:matrix});
@@ -154,6 +162,38 @@ function splitRuns(text,segments){
   index=best.end;
  }
  return runs;
+}
+// The placement a producer wrote for this run, at the precision it wrote it.
+// A rewritten value must keep the row's baseline exactly: re-deriving the same
+// number from the preview's rounded block coordinates turns 403.23749 into
+// 403.237, which is the trace of another program writing into the page.
+function matrixOrigin(op){
+ try{
+  const v=(op?.args||[]).map(arg=>Number(arg?.value??arg));
+  if(v.length!==6||!v.every(Number.isFinite))return null;
+  if(v[0]!==1||v[1]!==0||v[2]!==0||v[3]!==1)return null;
+  return {x:v[4],y:v[5]};
+ }catch{return null}
+}
+// Where the replacement goes, measured from the producer's own origin: a column
+// value keeps the right edge the document ended at, prose keeps its left edge.
+// Both advances come from the same encoder, so a width table that is a little
+// optimistic about a glyph cancels between the two and the edge still lands.
+function exactPlacement(pairs,block,segments,matrixOp,original){
+ const origin=matrixOp?matrixOrigin(matrixOp):null;
+ if(!origin||segments.length!==1||block.text.indexOf('\n')>=0)return null;
+ const encoder=segments[0].encoder;
+ const previous=String(pairs[0].info?.str??original?.text??'');
+ if(!previous)return null;
+ const before={...block,spacing:original?.spacing??block.spacing,wordSpacing:original?.wordSpacing??block.wordSpacing};
+ let advanceBefore,advanceAfter;
+ try{
+  advanceBefore=textMetrics(encoder,previous,before).width;
+  advanceAfter=textMetrics(encoder,block.text,block).width;
+ }catch{return null}
+ if(!Number.isFinite(advanceBefore)||!Number.isFinite(advanceAfter))return null;
+ const column=valueInColumn(previous)&&valueInColumn(block.text);
+ return {x:column?origin.x+(advanceBefore-advanceAfter):origin.x,y:origin.y,origin};
 }
 function rewriteInPlace(pairs,block,fontResources,viewport,targets,original,matrixPatches=null){
  if(block.removed||!block.text||block.underline)return null;
@@ -186,7 +226,7 @@ function rewriteInPlace(pairs,block,fontResources,viewport,targets,original,matr
  // A matrix can only be reused when the text object exists to place this one run.
  const holder=first.slot.textObject;
  const matrixOp=matrixPatches&&pairs.length===1&&holder&&holder.shows.length===1?first.slot.matrixAt:null;
- try{return drawInPlace(block,segments,viewport,{...original,fontResourceName:originalFontName?originalFontName.toString():null},matrixOp,matrixPatches)}catch{return null}
+ try{const placement=matrixOp?exactPlacement(pairs,block,segments,matrixOp,original):null;return drawInPlace(block,segments,viewport,{...original,fontResourceName:originalFontName?originalFontName.toString():null},matrixOp,matrixPatches,placement)}catch{return null}
 }
 function buildTree(source,resources,state,context,L,slots,ancestors=[],depth=0){if(depth>30)throw new Error('PDF form nesting is too deep.');const node={source,resources,patches:[],forms:[]};let current={...state},saves=[],textObject=null;node.operations=parseContent(source);for(const operation of node.operations){const a=operation.args;if(operation.op==='BT'){textObject={matrix:null,shows:[],moved:false}}
 if(operation.op==='q')saves.push({...current});else if(operation.op==='Q')current=saves.pop()||current;else if(operation.op==='Tf'){const fonts=lookup(resources,'Font',L),key=a[0]?.value;const fontObject=fonts?.get(L.PDFName.of(key||''));current={...current,fontObject,fontDict:fontObject?context.lookup(fontObject,L.PDFDict):null,size:a[1]?.value}}else if(operation.op==='Tc')current.spacing=a[0]?.value;else if(operation.op==='Tw')current.word=a[0]?.value;else if(operation.op==='gs'){const ext=lookup(resources,'ExtGState',L),g=ext?.lookupMaybe(L.PDFName.of(a[0]?.value||''),L.PDFDict),font=g?.lookupMaybe(L.PDFName.of('Font'),L.PDFArray);if(font)current={...current,fontObject:font.get(0),fontDict:context.lookup(font.get(0),L.PDFDict),size:font.lookup(1,L.PDFNumber).asNumber()}}else if(['Tj','TJ',"'",'"'].includes(operation.op)){if(operation.op==='"'){current.word=a[0]?.value;current.spacing=a[1]?.value}if(!current.fontObject)throw new Error('PDF text has no resolvable font resource.');if(textObject){textObject.shows.push(operation);if(operation.op==="'"||operation.op==='"')textObject.moved=true}slots.push({node,operation,state:{...current},fontObject:current.fontObject,fontDict:current.fontDict,textObject,matrixAt:textObject&&!textObject.moved?textObject.matrix:null})}else if(operation.op==='Tm'){if(textObject)textObject.matrix=operation}else if(operation.op==='Td'||operation.op==='TD'||operation.op==='T*'){if(textObject)textObject.moved=true}else if(operation.op==='Do'){const xobjects=lookup(resources,'XObject',L),key=L.PDFName.of(a[0]?.value||''),ref=xobjects?.get(key),object=ref?context.lookup(ref):null;if(object instanceof L.PDFStream&&object.dict.get(L.PDFName.of('Subtype'))?.toString()==='/Form'){if(ancestors.includes(object))throw new Error('Recursive PDF form cannot be safely edited.');const childResources=lookup(object.dict,'Resources',L)||resources;const child=buildTree(ascii(getDecoded(object,L)),childResources,{...current},context,L,slots,[...ancestors,object],depth+1);node.forms.push({operation,object,child})}}}return node}

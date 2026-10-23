@@ -294,9 +294,9 @@ test('an edited amount in this layout reports the row and fixes the balances aft
 
 test('a refund or reversal is not reported as a direction outlier', () => {
  const rows = [
-  {date: '01-04-2026', id: 'A1', narration: 'UPIAR/609237358835/DR/Mahalaks', amount: '100.00(Dr)', balance: '900.00(Cr)'},
-  {date: '02-04-2026', id: 'A2', narration: 'UPIAR/609251850281/DR/NEW MANN', amount: '12.00(Dr)', balance: '888.00(Cr)'},
-  {date: '03-04-2026', id: 'A3', narration: 'UPIAR/609292955913/DR/Supriya', amount: '77.00(Dr)', balance: '811.00(Cr)'},
+  {date: '01-04-2026', id: 'Y64949982', narration: 'UPIAR/609237358835/DR/Mahalaks', amount: '100.00(Dr)', balance: '900.00(Cr)'},
+  {date: '02-04-2026', id: 'Y65401285', narration: 'UPIAR/609251850281/DR/NEW MANN', amount: '12.00(Dr)', balance: '888.00(Cr)'},
+  {date: '03-04-2026', id: 'Y65111873', narration: 'UPIAR/609292955913/DR/Supriya', amount: '77.00(Dr)', balance: '811.00(Cr)'},
   // A reversed debit comes back as a credit: the same code, the other direction.
   {date: '04-04-2026', id: 'A4', narration: 'UPIAR/618220429989/REV/609237358835', amount: '100.00(Cr)', balance: '911.00(Cr)'},
   {date: '05-04-2026', id: 'A5', narration: 'UPIAR/refund of charge', amount: '5.00(Cr)', balance: '916.00(Cr)'},
@@ -348,4 +348,28 @@ test('an edited amount is listed so the change is visible before the balances mo
  const text = formatReport(report);
  assert.match(text, /Edited amounts \(1 row; the balances follow these\)/);
  assert.match(text, /page 1, row 3: 2000\.00\(Cr\) → 200\.00\(Cr\)/);
+});
+
+test('a remarks code that contradicts the row direction is offered as a fix', () => {
+ const rows = [
+  {date: '02-04-2026', id: 'Y64949982', narration: 'UPIAR/1/DR/Mahalaks', amount: '100.00(Dr)', balance: '850.00(Cr)'},
+  {date: '02-04-2026', id: 'Y65401285', narration: 'UPIAR/2/DR/Mahalaks', amount: '100.00(Dr)', balance: '750.00(Cr)'},
+  {date: '02-04-2026', id: 'Y65111873', narration: 'UPIAR/3/DR/Mahalaks', amount: '100.00(Dr)', balance: '650.00(Cr)'},
+  {date: '03-04-2026', id: 'S16801498', narration: 'UPIAB/4/CR/ SNEHA A', amount: '50.00(Cr)', amountX: 442.6, balance: '700.00(Cr)', balanceX: 511.6},
+  {date: '03-04-2026', id: 'S30340765', narration: 'UPIAB/5/CR/ SNEHA A', amount: '50.00(Cr)', amountX: 442.6, balance: '750.00(Cr)', balanceX: 511.6},
+  // The edited row: a debit turned into a credit, remarks and direction swapped
+  // but the narration code left behind.
+  {date: '04-04-2026', id: 'T17305718', narration: 'UPIAR/6/CR/Mahalaks', amount: '100.00(Cr)', amountX: 442.6, balance: '850.00(Cr)', balanceX: 511.6},
+ ];
+ const page = bankPage(rows, {page: 1, of: 2});
+ const {rows: extracted} = extractStatementRows([page]);
+ const report = checkStatement(extracted);
+ const issue = report.issues.find(entry => entry.code === 'narration_direction');
+ assert.ok(issue, 'the lone opposite-direction row is reported');
+ assert.match(issue.message, /UPIAB/, 'the message names the credit code this statement uses');
+ const fix = report.fixes.find(entry => entry.kind === 'narration');
+ assert.equal(fix.from, 'UPIAR/6/CR/Mahalaks');
+ assert.equal(fix.to, 'UPIAB/6/CR/Mahalaks');
+ // Nothing else was rewritten: the chain already adds up.
+ assert.equal(report.fixes.filter(entry => entry.kind !== 'narration').length, 0);
 });

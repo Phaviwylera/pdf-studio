@@ -563,9 +563,11 @@ async function applyStatementFixes(){
  if(!fixes.length||busy||statementChecking||signatureState.locked)return;
  // One edited amount moves every balance after it, so a big statement can need
  // hundreds of cells rewritten. Say so before touching the document.
+ const narrationFixes=fixes.filter(fix=>fix.kind==='narration').length,balanceFixes=fixes.length-narrationFixes;
  if(fixes.length>25){
   const pages=new Set(fixes.map(fix=>fix.page)).size;
-  if(!confirm(`This rewrites ${fixes.length} balance cells across ${pages} page${pages===1?'':'s'}, so every row after the edited amount adds up again. Continue?`))return;
+  const what=[balanceFixes?`${balanceFixes} balance cell${balanceFixes===1?'':'s'}`:'',narrationFixes?`${narrationFixes} remarks code${narrationFixes===1?'':'s'}`:''].filter(Boolean).join(' and ');
+  if(!confirm(`This rewrites ${what} across ${pages} page${pages===1?'':'s'}, so every row after the edited amount adds up again. Continue?`))return;
  }
  setBusy(true);
  try{
@@ -588,7 +590,7 @@ async function applyStatementFixes(){
   if(applied.length){invalidateCurrentExportFingerprint();for(const page of byPage.keys())schedulePaint(page,true)}
   sync();
   await runStatementCheck();
-  notice(missed.length?`${applied.length} balance cell${applied.length===1?'':'s'} updated; ${missed.length} could not be edited here. Undo restores the text.`:`${applied.length} balance cell${applied.length===1?'':'s'} updated. Undo restores the text.`);
+  notice(missed.length?`${applied.length} cell${applied.length===1?'':'s'} updated; ${missed.length} could not be edited here. Undo restores the text.`:`${applied.length} cell${applied.length===1?'':'s'} updated. Undo restores the text.`);
  }catch(error){notice(error.message||'The balances could not be updated.')}
  finally{setBusy(false);sync()}
 }

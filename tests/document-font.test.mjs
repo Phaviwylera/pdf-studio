@@ -64,12 +64,14 @@ test('CID widths are read from both /W array forms', () => {
   const descendant = context.obj({Type: 'Font', Subtype: 'CIDFontType2', DW: 1000, W: w});
   const {widths, defaultWidth} = parseCidWidths(descendant, context, L);
   assert.equal(defaultWidth, 1000);
+  // Keys match parseToUnicode's lowercase hex, so a width lookup for a code the
+  // CMap produced cannot silently miss and fall back to /DW.
   assert.equal(widths.get('0001'), 600);
   assert.equal(widths.get('0002'), 320);
   assert.equal(widths.get('0003'), 250);
-  assert.equal(widths.get('000A'), 480);
-  assert.equal(widths.get('000C'), 480);
-  assert.equal(widths.get('000D'), undefined);
+  assert.equal(widths.get('000a'), 480);
+  assert.equal(widths.get('000c'), 480);
+  assert.equal(widths.get('000d'), undefined);
  });
 });
 

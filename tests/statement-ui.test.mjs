@@ -15,7 +15,7 @@ test('the statement dialog exposes a status line, a report, the fixes and a re-c
  for (const id of ['statement-dialog', 'statement-close', 'statement-status', 'statement-info', 'statement-apply', 'statement-refresh'])
   assert.match(html, new RegExp(`id="${id}"`), `${id} exists`);
  assert.match(html, /<pre id="statement-info" class="fingerprint-output">/, 'the report is shown as copyable text');
- assert.match(html, /<button type="button" id="statement-apply" class="primary" disabled>Fix balances<\/button>/);
+ assert.match(html, /<button type="button" id="statement-apply" class="primary" disabled>Fix balances &amp; remarks<\/button>/);
  assert.match(html, /Undo restores the previous text/, 'the dialog says the change is reversible');
 });
 

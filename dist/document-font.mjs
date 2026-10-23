@@ -121,7 +121,7 @@ export function parseCidWidths(descendant, context, L) {
   if (next instanceof L.PDFArray) {
    for (let offset = 0; offset < next.size(); offset++) {
     const width = next.lookup(offset, L.PDFNumber)?.asNumber();
-    if (Number.isFinite(width)) widths.set(hex4(first + offset), width);
+    if (Number.isFinite(width)) widths.set(hex4(first + offset).toLowerCase(), width);
    }
    index += 2;
   } else {
@@ -129,7 +129,7 @@ export function parseCidWidths(descendant, context, L) {
    const width = array.lookup(index + 2, L.PDFNumber)?.asNumber();
    if (!Number.isFinite(last) || !Number.isFinite(width)) break;
    if (last - first > 0xffff) break;
-   for (let code = first; code <= last; code++) widths.set(hex4(code), width);
+   for (let code = first; code <= last; code++) widths.set(hex4(code).toLowerCase(), width);
    index += 3;
   }
  }
