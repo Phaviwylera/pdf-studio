@@ -10,6 +10,7 @@ import { decryptPdfCopy } from './decrypt.mjs';
 import { encryptExportCopy, encryptedExportName, validateExportPasswords } from './export-encryption.mjs';
 import {normalizeMeasure, formatMeasure, textPaintMode, canvasStrokeWidth, glyphLayout, baselineOffsetFor, sameTextState, paintStateUsable} from './typography.mjs';
 import {matchTextOperations} from './text-matching.mjs';
+import {readPdfFileId, sameFileId, fileIdWarning, enforceFileId} from './file-id.mjs';
 pdfjs.GlobalWorkerOptions.workerSrc='./vendor/pdf.worker.mjs';
 const $=id=>document.getElementById(id), OPS=pdfjs.OPS;
 let doc=null, original=null, uploadedOriginal=null, pageNo=1, filename='', selected=null, cache=new Map(), edits=new Map(), history=[], future=[], busy=false, fontCounter=0;
@@ -20,6 +21,7 @@ const originalFontJobs=new Map();
 let positionLocks=new Map();
 let signatureState={locked:false,signed:false,count:0,unknown:false};
 let sourceMetadata=null, uploadedMetadata=null, metadataReadVersion=0, metadataLoading=false, encryptMetadataVersion=0, skippedEncryptMetadata='';
+let sourceFileId=null, workingFileId=null, restoreFileId=null, restoreFileIdName='';
 function signatureProtectionMessage(){if(!signatureState.unknown)return 'Digital signature detected. Editing is locked and download returns the original file unchanged. Signature validity is not verified here.';if(signatureState.reason==='decrypt')return 'The password-protected PDF opened for viewing, but its working copy could not be decrypted safely for editing. Editing stays locked; download and Hash original use the exact uploaded bytes.';if(signatureState.reason==='encrypted')return 'This PDF is encrypted. The viewer can open it, but the export engine cannot safely inspect or rewrite encrypted PDFs. It is view-only; download returns the original unchanged. Request an unsigned, unencrypted editing copy from the issuer.';if(signatureState.reason==='library')return 'The PDF inspection library did not load. Reload the page and upload the PDF again. Editing stays locked until inspection succeeds; download returns the original unchanged.';return 'The PDF structure could not be fully inspected. This does not mean a signature was detected. Editing stays locked to protect any existing signature; download returns the original unchanged. Try a fresh original PDF from the issuer.';}
 function signatureLockNotice(){notice(signatureProtectionMessage())}
 
@@ -39,7 +41,7 @@ function repaintAllLoaded(){for(const view of pageViews.values())if(view.rendere
 function notice(message){$('toast').textContent=message;$('toast').hidden=false;clearTimeout(notice.timer);notice.timer=setTimeout(()=>$('toast').hidden=true,6500)}
 function status(message){$('status').textContent=message}
 function setBusy(value){busy=value;document.body.classList.toggle('busy',value);$('loading').hidden=!value;sync();$('encrypt').disabled=value}
-function sync(){$('matchfont').disabled=signatureState.locked||busy||!currentBlock()||!(currentBlock().canEdit||currentBlock().added);$('sign').disabled=!doc||busy||metadataLoading||signatureState.locked;$('metadata').disabled=!doc||busy||metadataLoading;$('metadata-file').disabled=!doc||busy||metadataLoading||signatureState.locked;$('metadata-remove').disabled=!doc||busy||metadataLoading||signatureState.locked||!uploadedMetadata;$('hashes').disabled=!doc||busy||metadataLoading;$('apply').disabled=signatureState.locked||busy||!currentBlock()||!(currentBlock().canEdit||currentBlock().added);$('align').disabled=$('apply').disabled;syncPositionLocks();$('export').disabled=!doc||busy||metadataLoading;$('add').disabled=!doc||busy||signatureState.locked;$('export').textContent=signatureState.locked?'Download original':'Export PDF';$('signaturestatus').hidden=!doc;$('signaturestatus').textContent=signatureState.unknown?'Inspection unavailable · view only':signatureState.locked?'Signature protected · view only':'Signature protection on';$('signature-message').hidden=!signatureState.locked;$('signature-message').textContent=signatureProtectionMessage();$('prev').disabled=!doc||pageNo<=1||busy;$('next').disabled=!doc||pageNo>=doc.numPages||busy;$('undo').disabled=!history.length||busy;$('redo').disabled=!future.length||busy;$('dirty').hidden=!(edits.size||uploadedMetadata);$('dirty').textContent=edits.size?'Unsaved changes':'Metadata replacement ready';$('pageinfo').textContent=doc?`${pageNo} / ${doc.numPages}`:'— / —';for(const b of $('pages').querySelectorAll('button')){b.classList.toggle('active',Number(b.dataset.page)===pageNo);b.querySelector('span').textContent=[...edits.values()].some(e=>e.page===Number(b.dataset.page))?'Edited':''}}
+function sync(){$('matchfont').disabled=signatureState.locked||busy||!currentBlock()||!(currentBlock().canEdit||currentBlock().added);$('sign').disabled=!doc||busy||metadataLoading||signatureState.locked;$('metadata').disabled=!doc||busy||metadataLoading;$('metadata-file').disabled=!doc||busy||metadataLoading||signatureState.locked;$('metadata-remove').disabled=!doc||busy||metadataLoading||signatureState.locked||!uploadedMetadata;$('hashes').disabled=!doc||busy||metadataLoading;$('fileid').disabled=!doc||busy||metadataLoading;$('apply').disabled=signatureState.locked||busy||!currentBlock()||!(currentBlock().canEdit||currentBlock().added);$('align').disabled=$('apply').disabled;syncPositionLocks();$('export').disabled=!doc||busy||metadataLoading;$('add').disabled=!doc||busy||signatureState.locked;$('export').textContent=signatureState.locked?'Download original':'Export PDF';$('signaturestatus').hidden=!doc;$('signaturestatus').textContent=signatureState.unknown?'Inspection unavailable · view only':signatureState.locked?'Signature protected · view only':'Signature protection on';$('signature-message').hidden=!signatureState.locked;$('signature-message').textContent=signatureProtectionMessage();$('prev').disabled=!doc||pageNo<=1||busy;$('next').disabled=!doc||pageNo>=doc.numPages||busy;$('undo').disabled=!history.length||busy;$('redo').disabled=!future.length||busy;$('dirty').hidden=!(edits.size||uploadedMetadata);$('dirty').textContent=edits.size?'Unsaved changes':'Metadata replacement ready';$('pageinfo').textContent=doc?`${pageNo} / ${doc.numPages}`:'— / —';for(const b of $('pages').querySelectorAll('button')){b.classList.toggle('active',Number(b.dataset.page)===pageNo);b.querySelector('span').textContent=[...edits.values()].some(e=>e.page===Number(b.dataset.page))?'Edited':''}}
 const norm=s=>(s||'').normalize('NFKC').replace(/\s/g,'');
 function infer(name,metadata={}){const n=String(name||'').replace(/^[A-Z]{6}\+/,'').replace(/[_,-]+/g,' '),mono=metadata.isMonospace||metadata.monospace||/courier|mono|consolas|menlo|typewriter/i.test(n),sans=/sans|arial|helvetica|calibri|carlito|roboto|segoe|tahoma|verdana|lato|gothic|inter(?:\s|$)/i.test(n),serif=!sans&&/times|serif|roman|garamond|cambria|caladea|baskerville|palatino|georgia|bookman|century/i.test(n);return {font:mono?'Courier New':serif?'Times New Roman':'Arial',bold:!!(metadata.bold||metadata.black)||/bold|black|heavy|demi|semibold/i.test(n),italic:!!metadata.italic||/italic|oblique|slanted/i.test(n)}}
 function fontFamilyKey(name){return String(name||'').replace(/^[A-Z]{6}\+/,'').replace(/[^a-z0-9]/ig,'').toLowerCase().replace(/(?:(?:semibold|demibold|bold|italic|oblique|regular|roman|medium|light|heavy|black|thin|book|normal|psmt|mt))+$/g,'');}
@@ -123,6 +125,7 @@ async function openFile(file){
  try{
   await paintQueue;
   const bytes=new Uint8Array(await file.arrayBuffer());
+  const uploadedFileId=await readPdfFileId(bytes,PDFLib);
   let acceptedPassword=null;
   const loading=pdfjs.getDocument({data:bytes.slice(),cMapUrl:'./vendor/cmaps/',cMapPacked:true,standardFontDataUrl:'./vendor/standard_fonts/',wasmUrl:'./vendor/wasm/',fontExtraProperties:true});
   loading.onPassword=(update,reason)=>{
@@ -144,11 +147,12 @@ async function openFile(file){
     nextSignatureState={locked:true,signed:false,count:0,unknown:true,reason:'decrypt'};
    }
   }
+  const nextWorkingFileId=workingBytes===bytes?uploadedFileId:await readPdfFileId(workingBytes,PDFLib);
   acceptedPassword=null;
   let nextMetadata=null;try{nextMetadata=await next.getMetadata()}catch{}
   const nextMetadataRecord=makeSourceMetadataRecord({filename:file.name||'document.pdf',byteLength:bytes.length,pageCount:next.numPages,inspection:uploadedInspection,metadata:nextMetadata});
   if(doc)await doc.destroy();doc=next;clearSigning();hashRecord=null;fingerprintedPdf=null;$('hash-pdf-download').disabled=true;$('hash-info').textContent='Choose which file to fingerprint.';$('hash-download').disabled=true;
-  original=workingBytes;uploadedOriginal=bytes;signatureState=nextSignatureState;sourceMetadata=nextMetadataRecord;uploadedMetadata=null;metadataReadVersion++;metadataLoading=false;$('metadata-file').value='';metadataUploadStatus();filename=file.name||'document.pdf';pageNo=1;selected=null;cache=new Map();edits=new Map();positionLocks=new Map();history=[];future=[];clearOriginalFonts();$('filename').textContent=filename;$('controls').hidden=true;$('selectionhint').hidden=false;$('pages').replaceChildren();
+  original=workingBytes;uploadedOriginal=bytes;sourceFileId=uploadedFileId;workingFileId=nextWorkingFileId;restoreFileId=null;restoreFileIdName='';$('fileid-file').value='';signatureState=nextSignatureState;sourceMetadata=nextMetadataRecord;uploadedMetadata=null;metadataReadVersion++;metadataLoading=false;$('metadata-file').value='';metadataUploadStatus();filename=file.name||'document.pdf';pageNo=1;selected=null;cache=new Map();edits=new Map();positionLocks=new Map();history=[];future=[];clearOriginalFonts();$('filename').textContent=filename;$('controls').hidden=true;$('selectionhint').hidden=false;$('pages').replaceChildren();
   for(let i=1;i<=doc.numPages;i++){const b=document.createElement('button');b.className='pagebutton';b.dataset.page=i;const label=document.createElement('b');label.textContent=`Page ${i}`;b.append(label,document.createElement('span'));b.onclick=()=>navigate(i);$('pages').append(b)}
   generation++;await setupDocumentViews();
   status(signatureState.reason==='decrypt'?'Password accepted · decryption unavailable · view only':signatureState.locked?'Signature protection on · original-only download':workingBytes!==bytes?'PDF unlocked in this browser · editable working copy ready':'Scroll through the document and click text to edit');
@@ -165,6 +169,62 @@ function undo(){if(busy||signatureState.locked)return;finishInline();if(!history
 function redo(){if(busy||signatureState.locked)return;finishInline();if(!future.length)return;history.push(snapshot());edits=future.pop();invalidateCurrentExportFingerprint();sync();repaintAllLoaded();if(selected&&currentBlock())select(selected)}
 function formatBytes(size){return size<1024?`${size} B`:size<1024*1024?`${(size/1024).toFixed(1)} KB`:`${(size/(1024*1024)).toFixed(2)} MB`}
 function currentExportName(){return filename.replace(/\.pdf$/i,'')+(uploadedMetadata&&!edits.size?'-metadata-updated.pdf':'-edited.pdf')}
+
+// ---- File identifier (/ID) ----
+// A PDF trailer can hold two byte strings: the permanent identifier created with
+// the file and the changing identifier rewritten on every save. The uploaded
+// original's pair is captured at open time (before any in-browser decryption) and
+// written back into exports so downstream file-identity checks stay valid.
+function activeFileId(){return restoreFileId||sourceFileId||null}
+function fileIdLines(label,id){
+ if(!id)return `${label}\n  No trailer /ID found.`;
+ const same=id.permanent===id.changing;
+ return `${label}\n  Permanent (created): ${id.permanent}\n  Changing (last save): ${same?'same as permanent':id.changing}`;
+}
+function workingFileIdChanged(){return !!(workingFileId&&sourceFileId&&!sameFileId(workingFileId,sourceFileId))}
+function fileIdDialogText(){
+ const target=activeFileId();
+ let text=fileIdLines('Uploaded original',sourceFileId)+'\n\n';
+ if(workingFileIdChanged())text+=`Working copy after in-browser decryption\n  Permanent (created): ${workingFileId.permanent}\n  Changing (last save): ${workingFileId.changing}\n  The decryption rewrite changed the changing identifier; that value is not exported.\n\n`;
+ text+=fileIdLines(restoreFileId?`Identifier to restore from “${restoreFileIdName}”`:'Identifier written into the next export',target);
+ return text;
+}
+function fileIdDialogStatus(){
+ if(!doc)return 'Open a PDF to inspect its file identifier.';
+ if(signatureState.locked)return 'This document is view-only, so export and download return the uploaded bytes unchanged. Its /ID is already the original.';
+ if(restoreFileId)return `The next export writes the /ID pair from “${restoreFileIdName}”. Choose the untouched original PDF if that is not the right file.`;
+ if(!sourceFileId)return 'The uploaded PDF has no trailer /ID. If you still have an untouched original that has one, choose it below to restore that identifier.';
+ if(workingFileIdChanged())return 'The in-browser decryption gave the working copy a new changing identifier. The next export restores both values from the uploaded original.';
+ return 'The next export keeps the uploaded original /ID pair unchanged.';
+}
+function syncFileIdDialog(){
+ if(!doc)return;
+ $('fileid-info').textContent=fileIdDialogText();
+ $('fileid-status').textContent=fileIdDialogStatus();
+ $('fileid-clear').disabled=!restoreFileId||busy||signatureState.locked;
+ $('fileid-file').disabled=!!busy||signatureState.locked;
+}
+function openFileIdDialog(){if(!doc||busy||metadataLoading)return;$('fileid-file').value='';syncFileIdDialog();$('fileid-dialog').showModal()}
+function clearRestoredFileId(){
+ if(busy)return;
+ restoreFileId=null;restoreFileIdName='';$('fileid-file').value='';
+ invalidateCurrentExportFingerprint();syncFileIdDialog();sync();status('Using the opened document’s file identifier');
+}
+async function selectFileIdSource(file){
+ if(!file||!doc||busy)return;
+ $('fileid-file').value='';
+ try{
+  if(!file.size)throw new Error('That PDF is empty.');
+  if(file.size>128*1024*1024)throw new Error('Choose a PDF under 128 MB.');
+  const bytes=new Uint8Array(await file.arrayBuffer());
+  const id=await readPdfFileId(bytes,PDFLib);
+  if(!id)throw new Error('That PDF has no trailer /ID to restore.');
+  restoreFileId=id;restoreFileIdName=file.name||'selected PDF';
+  invalidateCurrentExportFingerprint();syncFileIdDialog();sync();
+  status('Original file identifier loaded for the next export');
+  notice(`The next export writes the /ID pair from “${restoreFileIdName}”. Export again to replace a changed identifier.`);
+ }catch(error){notice(error.message||'Could not read that PDF’s file identifier.')}
+}
 function downloadOriginalCopy(){download(new Blob([uploadedOriginal.slice()],{type:'application/pdf'}),filename);status('Original downloaded unchanged · signature protection on');notice('The original file was downloaded byte-for-byte unchanged. Existing signature validity is not verified here.')}
 function clearExportPasswords(){for(const id of ['export-password','export-confirm','export-owner'])$(id).value=''}
 function clearExportForm(){clearExportPasswords();$('export-mode-standard').checked=true;$('export-password-fields').hidden=true;for(const id of ['export-password','export-confirm'])$(id).required=false;$('export-feedback').hidden=true;$('export-feedback').textContent='';$('export-submit').disabled=false;$('export-close').disabled=false}
@@ -188,19 +248,25 @@ async function exportPdf(event){
  setBusy(true);
  try{
   await paintQueue;
-  const bytes=await exportNativePdf({original,edits,getPage,fonts:loadedFonts,originalFonts,PDFLib,fontkit:window.fontkit,metadataRecord:sourceMetadata,uploadedMetadata,onProgress:status});
+  const fileId=activeFileId();
+  const nativeBytes=await exportNativePdf({original,edits,getPage,fonts:loadedFonts,originalFonts,PDFLib,fontkit:window.fontkit,metadataRecord:sourceMetadata,uploadedMetadata,fileId,onProgress:status});
+  const checkedExport=await enforceFileId({bytes:nativeBytes,fileId,PDFLib});
+  const bytes=checkedExport.bytes;
+  let idWarning=checkedExport.status==='preserved'||checkedExport.status==='none'?'':fileIdWarning(fileId,checkedExport.actual||null);
   if(encrypted){
-   const protectedBytes=await encryptExportCopy({bytes,password:passwords.password,confirmation:passwords.password,ownerPassword:passwords.ownerPassword,PDFLib,onProgress:message=>{showExportFeedback(message);status(message)}});
+   const protectedBytes=await encryptExportCopy({bytes,password:passwords.password,confirmation:passwords.password,ownerPassword:passwords.ownerPassword,fileId,PDFLib,onProgress:message=>{showExportFeedback(message);status(message)}});
+   const protectedId=await readPdfFileId(protectedBytes,PDFLib);
+   if(fileId&&!sameFileId(fileId,protectedId))idWarning='The AES-256 copy could not keep the original file identifier.';
    const name=encryptedExportName(currentExportName());
    download(new Blob([protectedBytes],{type:'application/pdf'}),name);
    closeExportDialog();
-   status(`Encrypted PDF downloaded · AES-256 · ${formatBytes(protectedBytes.length)} · uploaded original ${formatBytes(uploadedOriginal.length)}`);
-   notice(`AES-256 password-protected PDF downloaded as “${name}”. ${uploadedMetadata?'Your edits and replaced Info/XMP metadata are included.':'Your edits and the existing native metadata are included.'} Passwords stayed in this browser and were cleared; they cannot be recovered.`)
+   status(`Encrypted PDF downloaded · AES-256 · ${formatBytes(protectedBytes.length)} · uploaded original ${formatBytes(uploadedOriginal.length)}${fileId&&!idWarning?' · file ID preserved':''}`);
+   notice(`AES-256 password-protected PDF downloaded as “${name}”. ${uploadedMetadata?'Your edits and replaced Info/XMP metadata are included.':'Your edits and the existing native metadata are included.'} Passwords stayed in this browser and were cleared; they cannot be recovered.${idWarning?' '+idWarning:''}`)
   }else{
    download(new Blob([bytes],{type:'application/pdf'}),currentExportName());
    closeExportDialog();
-   status(`${uploadedMetadata&&!edits.size?'Exported PDF with replaced metadata':'Exported native PDF'} · ${formatBytes(bytes.length)} · uploaded original ${formatBytes(uploadedOriginal.length)}`);
-   notice(uploadedMetadata?'PDF Info/XMP replaced from your JSON; omitted source fields were removed. Exported bytes and hashes changed.':'PDF exported with selectable text and existing graphics. No page images were created.')
+   status(`${uploadedMetadata&&!edits.size?'Exported PDF with replaced metadata':'Exported native PDF'} · ${formatBytes(bytes.length)} · uploaded original ${formatBytes(uploadedOriginal.length)}${fileId&&!idWarning?' · file ID preserved':''}`);
+   notice((uploadedMetadata?'PDF Info/XMP replaced from your JSON; omitted source fields were removed. Exported bytes and hashes changed.':'PDF exported with selectable text and existing graphics. No page images were created.')+(idWarning?' '+idWarning:''))
   }
  }catch(error){
   showExportFeedback(error.message||(encrypted?'Encrypted PDF export failed. No password was stored.':'Native PDF export failed. No image conversion was performed.'));
@@ -215,8 +281,8 @@ async function exportPdf(event){
 let signingCredential=null,hashRecord=null,fingerprintedPdf=null,certificateReadVersion=0;
 function clearSigning(){certificateReadVersion++;signingCredential=null;$('p12-password').value='';$('p12-file').value='';$('p12-authorized').checked=false;$('p12-sign').disabled=true;$('p12-info').textContent='Choose a certificate to see the signing identity.';$('sign-feedback').textContent='';}
 async function inspectP12(){const readVersion=++certificateReadVersion;signingCredential=null;$('p12-sign').disabled=true;$('p12-inspect').disabled=true;try{const file=$('p12-file').files[0];if(!file)throw new Error('Choose a PFX or P12 certificate.');if(!/\.(pfx|p12)$/i.test(file.name))throw new Error('Choose a .pfx or .p12 file.');const bytes=new Uint8Array(await file.arrayBuffer());if(readVersion!==certificateReadVersion){bytes.fill(0);return;}try{signingCredential=readCertificate(bytes,$('p12-password').value,window.forge);}finally{bytes.fill(0);$('p12-password').value='';}$('p12-info').textContent=JSON.stringify(signingCredential.info,null,2);$('sign-feedback').textContent='Certificate read. Check the identity and confirm your signing authority.';$('p12-sign').disabled=!$('p12-authorized').checked;}catch(e){$('p12-info').textContent='Certificate could not be read.';$('sign-feedback').textContent=e.message;}finally{$('p12-inspect').disabled=false;}}
-async function downloadSignedCopy(){finishInline();if(!doc||busy||metadataLoading||signatureState.locked||!signingCredential||!$('p12-authorized').checked)return;const credential=signingCredential;setBusy(true);$('p12-sign').disabled=true;$('sign-close').disabled=true;$('p12-inspect').disabled=true;$('sign-feedback').textContent='Preparing and signing the new copy…';try{await paintQueue;const bytes=await exportNativePdf({original,edits,getPage,fonts:loadedFonts,originalFonts,PDFLib,fontkit:window.fontkit,metadataRecord:sourceMetadata,uploadedMetadata,onProgress:status});const result=await signPdfCopy({bytes,sourceBytes:uploadedOriginal,credential,PDFLib,forge:window.forge});const name=filename.replace(/\.pdf$/i,'')+'-signed-copy.pdf';download(new Blob([result.bytes],{type:'application/pdf'}),name);fingerprintedPdf={blob:new Blob([result.bytes],{type:'application/pdf'}),name};$('hash-pdf-download').disabled=false;hashRecord={file:name,kind:'new signed copy',signer:result.signer,source:result.source,...result.fingerprints};$('hash-info').textContent=JSON.stringify(hashRecord,null,2);$('hash-download').disabled=false;clearSigning();$('sign-dialog').close();$('hash-dialog').showModal();status('Signed copy downloaded · original retained');notice('New signature added with your certificate. Check certificate trust in your PDF reader.');}catch(e){$('sign-feedback').textContent=e.message||'Signing failed.';}finally{signingCredential=null;$('p12-sign').disabled=true;$('p12-password').value='';$('p12-inspect').disabled=false;$('sign-close').disabled=false;setBusy(false);}}
-async function calculateFingerprints(current){finishInline();if(!doc||busy||metadataLoading)return;setBusy(true);$('hash-original').disabled=$('hash-current').disabled=true;try{await paintQueue;const bytes=current&&!signatureState.locked?await exportNativePdf({original,edits,getPage,fonts:loadedFonts,originalFonts,PDFLib,fontkit:window.fontkit,metadataRecord:sourceMetadata,uploadedMetadata}):uploadedOriginal.slice();const name=current&&!signatureState.locked?currentExportName():filename;fingerprintedPdf={blob:new Blob([bytes],{type:'application/pdf'}),name};$('hash-pdf-download').disabled=false;hashRecord={file:name,kind:current&&!signatureState.locked?'current native export':'original',...await fingerprints(bytes)};$('hash-info').textContent=JSON.stringify(hashRecord,null,2);$('hash-download').disabled=false;}catch(e){$('hash-info').textContent=e.message||'Fingerprint calculation failed.';}finally{$('hash-original').disabled=$('hash-current').disabled=false;setBusy(false);}}
+async function downloadSignedCopy(){finishInline();if(!doc||busy||metadataLoading||signatureState.locked||!signingCredential||!$('p12-authorized').checked)return;const credential=signingCredential;setBusy(true);$('p12-sign').disabled=true;$('sign-close').disabled=true;$('p12-inspect').disabled=true;$('sign-feedback').textContent='Preparing and signing the new copy…';try{await paintQueue;const fileId=activeFileId();const bytes=await exportNativePdf({original,edits,getPage,fonts:loadedFonts,originalFonts,PDFLib,fontkit:window.fontkit,metadataRecord:sourceMetadata,uploadedMetadata,fileId,onProgress:status});const result=await signPdfCopy({bytes,sourceBytes:uploadedOriginal,credential,PDFLib,forge:window.forge,fileId});const name=filename.replace(/\.pdf$/i,'')+'-signed-copy.pdf';download(new Blob([result.bytes],{type:'application/pdf'}),name);fingerprintedPdf={blob:new Blob([result.bytes],{type:'application/pdf'}),name};$('hash-pdf-download').disabled=false;hashRecord={file:name,kind:'new signed copy',signer:result.signer,source:result.source,...result.fingerprints};$('hash-info').textContent=JSON.stringify(hashRecord,null,2);$('hash-download').disabled=false;clearSigning();$('sign-dialog').close();$('hash-dialog').showModal();status('Signed copy downloaded · original retained');notice('New signature added with your certificate. Check certificate trust in your PDF reader.');}catch(e){$('sign-feedback').textContent=e.message||'Signing failed.';}finally{signingCredential=null;$('p12-sign').disabled=true;$('p12-password').value='';$('p12-inspect').disabled=false;$('sign-close').disabled=false;setBusy(false);}}
+async function calculateFingerprints(current){finishInline();if(!doc||busy||metadataLoading)return;setBusy(true);$('hash-original').disabled=$('hash-current').disabled=true;try{await paintQueue;const bytes=current&&!signatureState.locked?await exportNativePdf({original,edits,getPage,fonts:loadedFonts,originalFonts,PDFLib,fontkit:window.fontkit,metadataRecord:sourceMetadata,uploadedMetadata,fileId:activeFileId()}):uploadedOriginal.slice();const name=current&&!signatureState.locked?currentExportName():filename;fingerprintedPdf={blob:new Blob([bytes],{type:'application/pdf'}),name};$('hash-pdf-download').disabled=false;hashRecord={file:name,kind:current&&!signatureState.locked?'current native export':'original',...await fingerprints(bytes)};$('hash-info').textContent=JSON.stringify(hashRecord,null,2);$('hash-download').disabled=false;}catch(e){$('hash-info').textContent=e.message||'Fingerprint calculation failed.';}finally{$('hash-original').disabled=$('hash-current').disabled=false;setBusy(false);}}
 function describeMetadataFields(upload,limit=8){
  const names=upload.fields.map(field=>field.key);
  const shown=names.slice(0,limit).join(', ')+(names.length>limit?`, … (${names.length-limit} more)`:'');
@@ -287,7 +353,7 @@ async function encryptStandalonePdf(event){
  setBusy(true);
  try{
   const bytes=new Uint8Array(await file.arrayBuffer());
-  const encrypted=await encryptPdfCopy({bytes,password,ownerPassword,metadataFile:metadataPayload,PDFLib,onProgress:message=>{$('encrypt-feedback').textContent=message;status(message)}});
+  const encrypted=await encryptPdfCopy({bytes,password,ownerPassword,metadataFile:metadataPayload,fileId:await readPdfFileId(bytes,PDFLib),PDFLib,onProgress:message=>{$('encrypt-feedback').textContent=message;status(message)}});
   const name=file.name.replace(/\.pdf$/i,'')+'-encrypted.pdf';
   download(new Blob([encrypted],{type:'application/pdf'}),name);
   $('encrypt-dialog').close();
@@ -337,6 +403,7 @@ $('export-close').onclick=()=>{if(!busy)closeExportDialog()};$('export-cancel').
 $('export-dialog').addEventListener('cancel',event=>{if(busy)event.preventDefault();else closeExportDialog()});
 $('export-dialog').addEventListener('close',()=>{if(!busy)clearExportForm()});
 $('export-mode-standard').onchange=syncExportMode;$('export-mode-encrypted').onchange=syncExportMode;
+$('fileid').onclick=openFileIdDialog;$('fileid-close').onclick=()=>$('fileid-dialog').close();$('fileid-dialog').addEventListener('cancel',event=>{if(busy)event.preventDefault()});$('fileid-file').onchange=()=>selectFileIdSource($('fileid-file').files[0]);$('fileid-clear').onclick=clearRestoredFileId;
 $('metadata').onclick=()=>{if(!doc||busy||!sourceMetadata)return;$('metadata-info').textContent=metadataJson(sourceMetadata);metadataUploadStatus();$('metadata-dialog').showModal();};$('metadata-close').onclick=()=>$('metadata-dialog').close();$('metadata-download').onclick=()=>{if(!sourceMetadata)return;download(new Blob([metadataJson(sourceMetadata)],{type:'application/json'}),'pdf-studio-source-metadata.json');status('Source metadata JSON downloaded');};$('metadata-file').onchange=()=>selectMetadataUpload($('metadata-file').files[0]);$('metadata-remove').onclick=()=>{if(!uploadedMetadata||busy||metadataLoading)return;metadataReadVersion++;uploadedMetadata=null;$('metadata-file').value='';invalidateCurrentExportFingerprint();metadataUploadStatus();sync();status('Metadata replacement removed from the next export');};
 $('sign').onclick=()=>{if(doc&&!busy&&!signatureState.locked){clearSigning();$('sign-dialog').showModal();}};$('sign-close').onclick=()=>{clearSigning();$('sign-dialog').close();};$('sign-dialog').addEventListener('cancel',e=>{if(busy)e.preventDefault();else clearSigning();});$('sign-dialog').addEventListener('close',()=>{if(!busy)clearSigning();});$('p12-inspect').onclick=inspectP12;$('p12-file').onchange=()=>{certificateReadVersion++;signingCredential=null;$('p12-sign').disabled=true;$('p12-authorized').checked=false;$('p12-info').textContent='Read the selected certificate to inspect its identity.';};$('p12-authorized').onchange=()=>{$('p12-sign').disabled=!signingCredential||!$('p12-authorized').checked;};$('p12-sign').onclick=downloadSignedCopy;$('hashes').onclick=()=>{if(!doc||busy)return;$('hash-dialog').showModal();};$('hash-close').onclick=()=>$('hash-dialog').close();$('hash-original').onclick=()=>calculateFingerprints(false);$('hash-current').onclick=()=>calculateFingerprints(true);$('hash-pdf-download').onclick=()=>{if(fingerprintedPdf)download(fingerprintedPdf.blob,fingerprintedPdf.name);};$('hash-download').onclick=()=>{if(hashRecord)download(new Blob([JSON.stringify(hashRecord,null,2)],{type:'application/json'}),'pdf-fingerprints.json');};
 const downloadUrls=new Map();

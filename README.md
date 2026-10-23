@@ -1,6 +1,6 @@
 # PDF Studio
 
-Browser-local PDF text editing with continuous scrolling, native-text export with an optional AES-256 password-protected copy, password-protected PDF decryption in WebAssembly, source metadata inspection and optional replacement, standalone AES-256 PDF encryption with optional JSON-based native metadata replacement, fixed-decimal alignment, per-text X/Y position locks, SHA-256/SHA-512 fingerprints, and authorized RSA PFX/P12 signing.
+Browser-local PDF text editing with continuous scrolling, native-text export with an optional AES-256 password-protected copy, password-protected PDF decryption in WebAssembly, source metadata inspection and optional replacement, standalone AES-256 PDF encryption with optional JSON-based native metadata replacement, fixed-decimal alignment, per-text X/Y position locks, trailer `/ID` preservation with manual restore, SHA-256/SHA-512 fingerprints, and authorized RSA PFX/P12 signing.
 
 Live app: https://pdf-studio.phavithiranofficial.chatgpt.site
 
@@ -51,6 +51,19 @@ When a PDF embeds a font program, the editor registers that program for the docu
 
 Most PDF producers embed only a **subset** of the font — the glyphs actually used somewhere in that document. Characters that are absent from the subset cannot be drawn with the original font; the editor then names the missing characters and uses a substitute for the edit (or a loaded TTF/OTF) rather than exporting blank glyphs. To recover those characters, load the full TTF/OTF in **Available font → Load font file** and choose **Best font match**. Standard PDF fonts without an embedded program (Helvetica, Times, Courier) use the bundled standard-font program that PDF.js loads (Liberation in this build) for typed text, with family substitutes only when a character is absent.
 
+## File identifier (/ID)
+
+A PDF trailer can carry an array of two byte strings: the **permanent** identifier created with the file and the **changing** identifier rewritten whenever the file is saved. Rewrite tools — qpdf decryption in this app, other editors, print-to-PDF — often replace that pair or change its literal/hexadecimal encoding, which makes downstream file-identity checks report `ID_CHANGED` even when the text edits themselves are correct.
+
+PDF Studio captures the `/ID` pair from the bytes you upload, before any in-browser decryption, and writes both values back unchanged into every export it creates: regular native exports, metadata-replacement exports, AES-256 password-protected exports and signed copies. No text edit is required for this to happen. The pair is also reported and can be restored manually from the **File ID** button in the header:
+
+- It shows the uploaded original pair, any different pair produced by the in-browser decryption working copy, and the pair that will be written into the next export.
+- **Restore the original identifier from a PDF** accepts the untouched original (or any PDF with the identifier you want) and writes that pair into the next export. Use this when the identifier was already lost, for example when reopening an earlier export. Only the trailer `/ID` is read; nothing else is copied and nothing is uploaded.
+- **Use the opened document's identifier** removes that manual selection.
+- If the opened PDF has no `/ID`, none is invented. Standalone **Encrypt PDF** also keeps its source file's `/ID` and can restore a supplied pair.
+
+Restoring the identifier does not restore the original fingerprint: text edits, metadata replacement, encryption and re-saving all change the file bytes, so SHA-256/SHA-512 differ. It only makes the document identifier match again.
+
 ## Source metadata
 
 After opening a PDF, click **Metadata** to inspect and download a JSON record of its native PDF Info fields (including custom fields) and XMP XML, when available. Calculated PDF.js document properties are not shown as Info metadata. Without a replacement upload, an edited native export preserves the source PDF's Info dictionary and XMP stream and embeds `pdf-studio-source-metadata.json` as a provenance attachment. An unchanged download remains byte-for-byte original.
@@ -76,7 +89,7 @@ Optionally choose a UTF-8 `.json` metadata file (up to 8 MB) to **replace the PD
 
 Downloads use a blob link appended to the page. After any download the app shows a **Download ready** panel with the filename, size, a **Save again** link, an **Open file** link, and — inside an embedded preview — **Open app in new tab**. Embedded preview frames can block automatic downloads even when the file was created successfully; use that panel or open the app in its own tab and retry there.
 
-Run metadata, typography, export-choice, encryption, decryption, fingerprint and module-wiring regression tests with `node --test tests/*.test.mjs` (Node.js required only for tests). Typography tests cover 0.001 pt normalization, glyph-advance layout without kerning, word/letter spacing, paint modes, stroke weight and baseline placement. Syntax-check the runtime and test modules with `node --check dist/*.mjs` and `node --check tests/*.mjs` before running the suite.
+Run metadata, typography, export-choice, encryption, decryption, file-identifier, fingerprint and module-wiring regression tests with `node --test tests/*.test.mjs` (Node.js required only for tests). Typography tests cover 0.001 pt normalization, glyph-advance layout without kerning, word/letter spacing, paint modes, stroke weight and baseline placement. Syntax-check the runtime and test modules with `node --check dist/*.mjs` and `node --check tests/*.mjs` before running the suite.
 
 ## Protection and signing
 
@@ -95,6 +108,7 @@ New signed copies use an authorized user-provided RSA 2048+ PFX/P12 certificate 
 - `dist/typography.mjs`: the shared typography model (0.001 pt measures, glyph advances, spacing, paint modes, stroke weight and baseline placement).
 - `dist/positioning.mjs`: axis-lock helpers.
 - `dist/metadata.mjs`: source metadata report, Info/XMP replacement or preservation, and optional provenance attachment.
+- `dist/file-id.mjs`: trailer `/ID` capture, encoding-preserving restore and export verification.
 - `dist/font-identity.mjs`: Arial/Helvetica family, style and subset-name recognition.
 - `dist/font-coverage.mjs`: embedded-font character coverage, missing-glyph reporting and mixed font-run selection for canvas previews.
 - `dist/signing.mjs`: PFX/P12 handling, signed-copy creation and fingerprints.

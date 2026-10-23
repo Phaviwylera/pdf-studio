@@ -1,4 +1,5 @@
 import {signatureProtectionForDocument} from './native-export.mjs';
+import {applyFileId} from './file-id.mjs';
 function binary(bytes){let result='';for(let i=0;i<bytes.length;i+=8192)result+=String.fromCharCode(...bytes.subarray(i,i+8192));return result;}
 export async function fingerprints(bytes){const hex=b=>Array.from(new Uint8Array(b),v=>v.toString(16).padStart(2,'0')).join('');const [sha256,sha512]=await Promise.all([crypto.subtle.digest('SHA-256',bytes),crypto.subtle.digest('SHA-512',bytes)]);return {bytes:bytes.length,sha256:hex(sha256),sha512:hex(sha512)};}
 export function readCertificate(bytes,password,F,now=new Date()){
@@ -18,8 +19,10 @@ export function readCertificate(bytes,password,F,now=new Date()){
  return {key,cert,certs,info:{name,issuer,serial:cert.serialNumber,validFrom:cert.validity.notBefore.toISOString(),validTo:cert.validity.notAfter.toISOString(),fingerprint,algorithm:'RSA / SHA-256'}};
 }
 function printable(s){return String(s).replace(/[^\x20-\x7e]/g,'?');}
-export async function signPdfCopy({bytes,sourceBytes,credential,PDFLib:L,forge:F,now=new Date()}){
- const d=await L.PDFDocument.load(bytes.slice(),{updateMetadata:false});if(signatureProtectionForDocument(d,L).locked)throw new Error('Existing signed PDFs are protected. Use an unsigned editing copy authorized by the issuer.');
+export async function signPdfCopy({bytes,sourceBytes,credential,PDFLib:L,forge:F,now=new Date(),fileId=null}){
+ const d=await L.PDFDocument.load(bytes.slice(),{updateMetadata:false});
+ if(fileId)applyFileId(d,fileId,L);
+ if(signatureProtectionForDocument(d,L).locked)throw new Error('Existing signed PDFs are protected. Use an unsigned editing copy authorized by the issuer.');
  if(now<credential.cert.validity.notBefore||now>credential.cert.validity.notAfter)throw new Error('The certificate is outside its validity dates.');
  const source=await fingerprints(sourceBytes),info=credential.info;
  const page=d.addPage([595.28,841.89]),font=await d.embedFont(L.StandardFonts.Helvetica),bold=await d.embedFont(L.StandardFonts.HelveticaBold);let y=785;
