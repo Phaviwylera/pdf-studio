@@ -37,7 +37,7 @@ Statements and other bank-issued PDFs are often re-checked with a tamper validat
 - **No duplicate typeface copies.** Edited text is drawn with the font object the PDF already embeds, under the resource name the page already gives it. A second program is embedded only for a font the document does not contain, and an unchanged-style edit is written into the original text operator instead of adding a font at all.
 - **No editor-specific font names.** New resources are named `F1`, `F2`, … (forms `Fm1`, …) rather than `PSEditFont<n>` / `PSDocFont<n>`.
 - **No source descriptors.** Exports carry no `Source*` Info keys and no embedded source-metadata attachment.
-- **No deleted-text traces.** Removing a text block deletes the showing operation; a spacing-only `[<n>] TJ` remains only when later text on the same line depends on the pen position.
+- **No deleted-text traces.** Removing a text block deletes the showing operation; a spacing-only `[<n>] TJ` remains only when later text on the same line depends on the pen position. Edited text is rewritten inside its own text object, including size, colour, spacing and position changes, so the replacement is never drawn as a separate block.
 - **Consistent version and encryption.** AES-256 is only written into files whose header and catalog `/Version` are at least 1.7; the native export raises a stale catalog `/Version` to 1.7 as well.
 - **A separate owner password.** Leaving the owner password blank generates a random one, so the opening password cannot also unlock editing.
 

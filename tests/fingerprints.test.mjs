@@ -143,6 +143,25 @@ test('an unchanged-style edit is written into the original operation', async () 
  assert.doesNotMatch(latin1(exported), /PSEditFont|PSDocFont/);
 });
 
+test('a style change is still rewritten inside the original text object', async () => {
+ const original = await pageFixture();
+ const edited = block({size: 18, color: '#AA0000', x: 40, y: 120});
+ const exported = await exportNativePdf({
+  original, edits: new Map([[edited.id, edited]]), getPage: pageData('hello', [block({text: 'hello'})]), PDFLib: L,
+ });
+ const pdf = await L.PDFDocument.load(exported, {updateMetadata: false});
+ const text = await content(pdf);
+ // The new size, colour and position live in the original text object.
+ assert.match(text, /\/\S+ 18 Tf/);
+ assert.match(text, /0\.6666667 0 0 rg/);
+ assert.equal((text.match(/\bBT\b/g) || []).length, 1, 'no second text object is added');
+ assert.equal((text.match(/\bq\b/g) || []).length, 1, 'no extra graphics-state wrapper');
+ assert.doesNotMatch(text, /\[\s*-?\d+(?:\.\d+)?\s*\]\s*TJ/, 'no spacing-only TJ is left behind');
+ const fonts = pdf.getPage(0).node.Resources().lookup(name('Font'), L.PDFDict);
+ assert.equal([...fonts.entries()].length, 1, 'the page keeps its single font resource');
+ assert.doesNotMatch(latin1(exported), /PSEditFont|PSDocFont/);
+});
+
 test('a native export carries no source descriptors and no provenance attachment', async () => {
  const original = await pageFixture();
  const out = await exportNativePdf({
