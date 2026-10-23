@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createRequire} from 'node:module';
-import {exportNativePdf, documentHexEncoder} from '../dist/native-export.mjs';
+import {exportNativePdf, documentHexEncoder, alignHeader} from '../dist/native-export.mjs';
 
 const require = createRequire(import.meta.url);
 const L = require('../dist/vendor/pdf-lib.min.js');
@@ -198,4 +198,35 @@ test('a font the document already has writes the replacement as one plain string
 test('a character the document font cannot map is named, not dropped', () => {
  const font = {codes: new Map([['A', {code: '0041'}]]), widths: new Map(), defaultWidth: 500};
  assert.throws(() => documentHexEncoder(font)('AZ', 10), /no character mapping for "Z"/);
+});
+
+test('the export keeps the header marker the document had, not the library\'s', () => {
+ // What pdf-lib writes, and what the bank's own PDFBox-written file carries.
+ const library = Uint8Array.from([...Buffer.from('%PDF-1.7\n'), 0x25, 0x81, 0x81, 0x81, 0x81, ...Buffer.from('\n28 0 obj\n')]);
+ const producer = Uint8Array.from([...Buffer.from('%PDF-1.7\n'), 0x25, 0xe2, 0xe3, 0xcf, 0xd3, ...Buffer.from('\n1 0 obj\n')]);
+ const aligned = alignHeader(library, producer);
+ assert.equal(Buffer.from(aligned.subarray(0, 14)).toString('latin1'), '%PDF-1.7\n%\xE2\xE3\xCF\xD3');
+ assert.ok(!aligned.subarray(0, 32).includes(0x81), 'none of the library marker survives');
+ assert.ok(Buffer.from(aligned).toString('latin1').endsWith('\n28 0 obj\n'), 'the body is untouched');
+
+ // A document with no marker gets none back.
+ const bare = Uint8Array.from([...Buffer.from('%PDF-1.7\n'), ...Buffer.from('1 0 obj\n')]);
+ assert.equal(Buffer.from(alignHeader(library, bare).subarray(0, 8)).toString('latin1'), '%PDF-1.7');
+ assert.ok(!alignHeader(library, bare).subarray(0, 24).includes(0x81));
+});
+
+test('an exported statement starts with the producer\'s header bytes', async () => {
+ const original = await statementPage('100.00(Dr)');
+ // Pretend the opened file came from the bank: PDFBox's marker, not pdf-lib's.
+ const marker = Uint8Array.from([0x25, 0xe2, 0xe3, 0xcf, 0xd3]);
+ const head = Buffer.from(original.bytes);
+ const at = head.indexOf(Buffer.from([0x25, 0x81, 0x81, 0x81, 0x81]));
+ assert.ok(at > 0, 'the fixture is a pdf-lib file');
+ head.set(marker, at);
+ const bank = new Uint8Array(head);
+
+ const fixture = {...original, text: '100.00(Dr)'};
+ const edit = block(fixture, {text: '1000.00(Cr)'});
+ const {bytes} = await exported(bank, fixture, edit);
+ assert.equal(Buffer.from(bytes.subarray(0, 14)).toString('latin1'), '%PDF-1.7\n%\xE2\xE3\xCF\xD3');
 });
