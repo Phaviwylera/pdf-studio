@@ -152,6 +152,34 @@ test('a new block is drawn at natural width too', async () => {
  }
 });
 
+test('a rewritten cell keeps the producer\'s baseline, decimal for decimal', async () => {
+ // A producer writes five decimals (715.08752); the preview only ever holds
+ // three (715.088). Re-deriving the baseline from the preview is what leaves a
+ // rounded coordinate in the page next to the untouched rows.
+ const original = await statementPage('100.00(Dr)', {x: 447.63751, y: 715.08752});
+ const fixture = {...original, text: '100.00(Dr)'};
+ const edit = block(fixture, {text: '1000.00(Cr)'});
+
+ const {text} = await exported(original.bytes, fixture, edit);
+ assert.ok(text.includes('715.08752'), 'the baseline is the producer\'s own number');
+ assert.ok(!/715\.08[0-7]\b/.test(text.replace('715.08752', '')), 'no rounded copy of that baseline');
+});
+
+test('a wider value keeps the right edge the producer ended at', async () => {
+ const original = await statementPage('100.00(Dr)', {x: 447.63751, y: 400.25});
+ const fixture = {...original, text: '100.00(Dr)'};
+ const edit = block(fixture, {text: '1000.00(Cr)'});
+
+ const advance = line => [...line].reduce((total, char) => total + (WIDTHS[char] ?? 600), 0) * 0.001 * fixture.size;
+ const expected = 447.63751 + advance('100.00(Dr)') - advance('1000.00(Cr)');
+
+ const {text} = await exported(original.bytes, fixture, edit);
+ const cell = matrices(text).find(([, , , , , y]) => y === 400.25);
+ assert.ok(cell, 'the cell keeps its row');
+ assert.ok(Math.abs(cell[4] - expected) < 1e-6, `starts at ${cell[4]}, expected ${expected}`);
+ assert.ok(Math.abs(cell[4] + advance('1000.00(Cr)') - (447.63751 + advance('100.00(Dr)'))) < 1e-6, 'the money column still lines up');
+});
+
 test('a font the document already has writes the replacement as one plain string', () => {
  // The page's own program is a subset: it has the glyphs for "NEFT", not for
  // every character the page happened to draw. The font dictionary's code map is
