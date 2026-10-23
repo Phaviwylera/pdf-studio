@@ -80,7 +80,7 @@ test('file identifier dialog restores the original /ID into exports', async () =
  assert.match(app, /async function selectFileIdSource\(file\)/);
  assert.match(app, /\$\('fileid-file'\)\.onchange=\(\)=>selectFileIdSource/);
  assert.match(app, /const fileId=activeFileId\(\);/);
- assert.match(app, /metadataRecord:sourceMetadata,uploadedMetadata,fileId,onProgress:status/);
+ assert.match(app, /metadataRecord:sourceMetadata,uploadedMetadata,fileId,headerSource:uploadedOriginal,onProgress:status/);
  assert.match(app, /enforceFileId\(\{bytes:nativeBytes,fileId,PDFLib\}\)/);
  assert.match(app, /ownerPassword:passwords\.ownerPassword,algorithm:\$\('export-algorithm'\)\.value,fileId,PDFLib,onProgress/);
  assert.match(app, /signPdfCopy\(\{bytes,sourceBytes:uploadedOriginal,credential,PDFLib,forge:window\.forge,fileId\}\)/);
@@ -117,8 +117,8 @@ test('document fonts are exported by reusing their existing font dictionary', as
  const font = await read('../dist/document-font.mjs');
  assert.match(app, /function documentFontPlans\(\)/);
  assert.match(app, /function donorResourceName\(inventory,font,page\)/);
- assert.match(app, /metadataRecord:sourceMetadata,uploadedMetadata,fileId,documentFonts:documentFontPlans\(\),onProgress:status/);
- assert.match(app, /metadataRecord:sourceMetadata,uploadedMetadata,documentFonts:documentFontPlans\(\),fileId:activeFileId\(\)\}/);
+ assert.match(app, /metadataRecord:sourceMetadata,uploadedMetadata,fileId,documentFonts:documentFontPlans\(\),headerSource:uploadedOriginal,onProgress:status/);
+ assert.match(app, /metadataRecord:sourceMetadata,uploadedMetadata,documentFonts:documentFontPlans\(\),fileId:activeFileId\(\),headerSource:uploadedOriginal\}/);
  assert.match(exporter, /import \{readDocumentFont, documentFontEncoder\} from '\.\/document-font\.mjs'/);
  assert.match(exporter, /documentFonts=new Map\(\)/);
  assert.match(exporter, /else if\(documentFonts\.has\(block\.font\)&&!fonts\.get\(block\.font\)\)/);

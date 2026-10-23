@@ -7,6 +7,8 @@
 // the file identity changed. Capture the uploaded file's exact pair and write it
 // back into every export we produce.
 
+import {alignHeader} from './header-marker.mjs';
+
 const MAX_SCAN_BYTES = 262144;
 
 export function hexFromBytes(bytes) {
@@ -228,7 +230,7 @@ export async function enforceFileId({bytes, fileId, PDFLib, encrypted = false}) 
  try {
   const document = await PDFLib.PDFDocument.load(bytes.slice(), {updateMetadata: false});
   applyFileId(document, fileId, PDFLib);
-  const saved = await document.save({useObjectStreams: true, addDefaultPage: false});
+  const saved = alignHeader(await document.save({useObjectStreams: true, addDefaultPage: false}), bytes);
   const verified = await readPdfFileId(saved, PDFLib);
   return {bytes: saved, status: fileIdStatus(fileId, verified), repaired: true, actual: verified};
  } catch {

@@ -262,3 +262,40 @@ test('the algorithm reaches the encryptor from the export path and is validated'
  assert.deepEqual(calls, ['RC4', 'AES-256']);
  await assert.rejects(() => encryptPdfCopy({bytes: new Uint8Array([1]), password: 'open sesame', PDFLib: L, algorithm: 'DES'}), /AES-256 or RC4 128-bit/);
 });
+
+test('an encrypted copy keeps the header marker of the copy it came from', async () => {
+ const source = await samplePdf();
+ // Pretend the opened document came from the bank: PDFBox's binary marker.
+ const bank = Uint8Array.from(source);
+ const at = Buffer.from(bank).indexOf(Buffer.from([0x25, 0x81, 0x81, 0x81, 0x81]));
+ assert.ok(at > 0, 'the fixture is a pdf-lib file, so it carries the library marker');
+ bank.set([0x25, 0xe2, 0xe3, 0xcf, 0xd3], at);
+ // /ID and the owner-key entries are randomised per save, so lengths vary between
+ // runs; record what the encryptor itself produced and compare against that.
+ let written = 0;
+ const measuring = async (bytes, password, options) => {
+  const out = await encryptPDF(bytes, password, options);
+  written = out.length;
+  return out;
+ };
+ const encryptWith = (bytes) => encryptPdfCopy({
+  bytes, password: 'open sesame', ownerPassword: 'owner password', algorithm: 'RC4-128',
+  PDFLib: L, onProgress: () => {}, encrypt: measuring,
+ });
+ for (const [label, input] of [['bank', bank], ['library', source]]) {
+  const out = await encryptWith(input);
+  const head = Buffer.from(out).subarray(0, 14).toString('latin1');
+  if (label === 'bank') {
+   assert.equal(head, '%PDF-1.7\n%\xE2\xE3\xCF\xD3', 'the encrypted copy names the producer, not this library');
+   assert.ok(!Buffer.from(out).subarray(0, 64).includes(0x81), 'no 0x81 marker survives encryption');
+  } else {
+   assert.equal(head, '%PDF-1.7\n%\x81\x81\x81\x81', 'a library file keeps its own marker');
+  }
+  // Encryption is a second save; the marker is swapped for one of the same size,
+  // so every offset the encryptor wrote still points at the object it described.
+  assert.equal(out.length, written, `${label}: alignment never shifts a byte`);
+  const text = Buffer.from(out).toString('latin1');
+  const xref = Number(/startxref\s+(\d+)/.exec(text)[1]);
+  assert.match(text.slice(xref, xref + 40), /^(xref|\d+ 0 obj)/, `${label}: startxref still points at the cross-reference`);
+ }
+});

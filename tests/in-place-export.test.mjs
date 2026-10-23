@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createRequire} from 'node:module';
-import {exportNativePdf, documentHexEncoder, alignHeader} from '../dist/native-export.mjs';
+import {exportNativePdf, documentHexEncoder} from '../dist/native-export.mjs';
+import {alignHeader} from '../dist/header-marker.mjs';
 
 const require = createRequire(import.meta.url);
 const L = require('../dist/vendor/pdf-lib.min.js');
@@ -208,11 +209,19 @@ test('the export keeps the header marker the document had, not the library\'s', 
  assert.equal(Buffer.from(aligned.subarray(0, 14)).toString('latin1'), '%PDF-1.7\n%\xE2\xE3\xCF\xD3');
  assert.ok(!aligned.subarray(0, 32).includes(0x81), 'none of the library marker survives');
  assert.ok(Buffer.from(aligned).toString('latin1').endsWith('\n28 0 obj\n'), 'the body is untouched');
+ // A saved PDF addresses its objects by absolute offset: the header must not move.
+ assert.equal(aligned.length, library.length, 'alignment never shifts a byte');
 
- // A document with no marker gets none back.
+ // A document with no marker gets none back — and still no shift.
  const bare = Uint8Array.from([...Buffer.from('%PDF-1.7\n'), ...Buffer.from('1 0 obj\n')]);
- assert.equal(Buffer.from(alignHeader(library, bare).subarray(0, 8)).toString('latin1'), '%PDF-1.7');
- assert.ok(!alignHeader(library, bare).subarray(0, 24).includes(0x81));
+ const bareAligned = alignHeader(library, bare);
+ assert.equal(Buffer.from(bareAligned.subarray(0, 8)).toString('latin1'), '%PDF-1.7');
+ assert.ok(!bareAligned.subarray(0, 24).includes(0x81));
+ assert.equal(bareAligned.length, library.length, 'a marker-less original still keeps every offset');
+ assert.equal(Buffer.from(bareAligned.subarray(0, 14)).toString('latin1'), '%PDF-1.7\n%    ', 'a plain comment, not a claim');
+
+ // A file that already carries the library's marker is left exactly as it is.
+ assert.equal(alignHeader(library, library), library);
 });
 
 test('an exported statement starts with the producer\'s header bytes', async () => {
@@ -229,4 +238,28 @@ test('an exported statement starts with the producer\'s header bytes', async () 
  const edit = block(fixture, {text: '1000.00(Cr)'});
  const {bytes} = await exported(bank, fixture, edit);
  assert.equal(Buffer.from(bytes.subarray(0, 14)).toString('latin1'), '%PDF-1.7\n%\xE2\xE3\xCF\xD3');
+});
+
+test('a protected upload keeps the uploaded file\'s marker, not the decryptor\'s', async () => {
+ const original = await statementPage('100.00(Dr)');
+ const bankMarker = Uint8Array.from([0x25, 0xe2, 0xe3, 0xcf, 0xd3]);
+ // What the user chose: the bank's own bytes, marker included.
+ const bank = Uint8Array.from(original.bytes);
+ bank.set(bankMarker, bank.indexOf(0x25, 9));
+ // What the editor works on after a qpdf decryption: qpdf's own marker.
+ const working = Uint8Array.from(original.bytes);
+ working.set([0x25, 0xbf, 0xf7, 0xa2, 0xfe], working.indexOf(0x25, 9));
+
+ const fixture = {...original, text: '100.00(Dr)'};
+ const edit = block(fixture, {text: '1000.00(Cr)'});
+ const bytes = await exportNativePdf({
+  original: working, headerSource: bank, edits: new Map([[edit.id, edit]]),
+  getPage: pageData(fixture, [block(fixture)]), PDFLib: L,
+ });
+ assert.equal(Buffer.from(bytes.subarray(0, 14)).toString('latin1'), '%PDF-1.7\n%\xE2\xE3\xCF\xD3');
+ assert.ok(!bytes.subarray(0, 64).includes(0x81), 'no library marker');
+ assert.ok(!bytes.subarray(0, 64).includes(0xbf), 'no decryptor marker');
+ const text = latin1(bytes);
+ const xref = Number(/startxref\s+(\d+)/.exec(text)[1]);
+ assert.match(text.slice(xref, xref + 20), /^(xref|\d+ 0 obj)/, 'the cross-reference still points at the objects');
 });

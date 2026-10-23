@@ -1,6 +1,7 @@
 // Native content-stream edits. No page image is created by this module.
 import {capturePdfMetadata, restorePdfMetadata, attachSourceMetadata, applyUploadedMetadata} from './metadata.mjs';
 import {ensureCatalogVersion} from './pdf-version.mjs';
+import {alignHeader} from './header-marker.mjs';
 import {applyFileId, sameFileId, fileIdFromDocument} from './file-id.mjs';
 import {readDocumentFont, documentFontEncoder} from './document-font.mjs';
 import {fontKey} from './font-inventory.mjs';
@@ -344,41 +345,17 @@ function mayEmbedTypeface(candidates, baseFont) {
  const identity = fontKey(baseFont || '');
  return !identity || !candidates.some(entry => fontKey(entry.font.baseFont || '') === identity);
 }
-// pdf-lib writes its own binary marker directly after the version line:
-// "%PDF-1.7\n%\x81\x81\x81\x81\n". No producer writes those four 0x81 bytes,
-// so a checker that looks at the bytes after the header can tell the file was
-// last saved by this library even when the Info dictionary still names the
-// bank's generator. Keep the marker the opened document had (or none at all).
-const LIBRARY_MARKER = Uint8Array.from([0x25, 0x81, 0x81, 0x81, 0x81]);
-export function headerMarker(bytes) {
- const end = bytes.indexOf(0x0a);
- if (end < 0 || bytes[0] !== 0x25) return {end, marker: null};
- const start = end + 1;
- if (bytes[start] !== 0x25) return {end, marker: null};
- let stop = start;
- while (stop < bytes.length && bytes[stop] !== 0x0a) stop++;
- return {end, marker: bytes.slice(start, stop)};
-}
-export function alignHeader(bytes, original) {
- const {end, marker} = headerMarker(bytes);
- if (end < 0 || !marker) return bytes;
- if (marker.length !== LIBRARY_MARKER.length || marker.some((byte, index) => byte !== LIBRARY_MARKER[index])) return bytes;
- // The opened document's own marker, or nothing when it had none: the export
- // must not introduce bytes the original file never carried.
- const replacement = headerMarker(original).marker || new Uint8Array(0);
- const out = new Uint8Array(bytes.length + replacement.length - marker.length);
- out.set(bytes.subarray(0, end + 1), 0);
- out.set(replacement, end + 1);
- out.set(bytes.subarray(end + 1 + marker.length), end + 1 + replacement.length);
- return out;
-}
-export async function exportNativePdf({original,edits,getPage,fonts=new Map(),originalFonts=new Map(),documentFonts=new Map(),PDFLib:L,fontkit,metadataRecord=null,uploadedMetadata=null,fileId=null,attachProvenance=false,onProgress=()=>{}}){
+export async function exportNativePdf({original,edits,getPage,fonts=new Map(),originalFonts=new Map(),documentFonts=new Map(),PDFLib:L,fontkit,metadataRecord=null,uploadedMetadata=null,fileId=null,attachProvenance=false,headerSource=null,onProgress=()=>{}}){
+ // The header marker to keep. Normally the opened file's own; for a protected
+ // upload it is the bytes the user chose, because the working copy was written
+ // by the decryptor and would otherwise hand its marker to the export.
+ const headerDonor=headerSource||original;
  const changes=[...edits.values()];
  if(!changes.length&&!uploadedMetadata){
   if(!fileId)return original.slice();
   // No text or metadata change, but the working copy (for example a qpdf
   // decryption) may carry a different /ID than the file the user uploaded.
-  try{const untouched=await L.PDFDocument.load(original.slice(),{updateMetadata:false});if(sameFileId(fileId,fileIdFromDocument(untouched,L)))return original.slice();applyFileId(untouched,fileId,L);return await untouched.save({useObjectStreams:true,addDefaultPage:false})}
+  try{const untouched=await L.PDFDocument.load(original.slice(),{updateMetadata:false});if(sameFileId(fileId,fileIdFromDocument(untouched,L)))return original.slice();applyFileId(untouched,fileId,L);return alignHeader(await untouched.save({useObjectStreams:true,addDefaultPage:false}),headerDonor)}
   catch{return original.slice()}
  }
  let output;try{output=await L.PDFDocument.load(original.slice(),{updateMetadata:false})}catch(error){throw new Error('This PDF cannot be safely rewritten as native content. Open an unlocked PDF first. No image conversion was performed.')}if(signatureProtectionForDocument(output,L).locked)throw new Error('Signature protection is mandatory. This PDF contains a digital signature and cannot be edited. Export the original unchanged or have the issuer sign a new document.');const savedMetadata=capturePdfMetadata(output,L);if(fontkit)output.registerFontkit(fontkit);const context=output.context,fontCache=new Map(),counter={value:0},pages=[...new Set(changes.map(b=>b.page))];for(const n of pages){onProgress(`Exporting native text on page ${n}…`);const page=output.getPage(n-1),data=await getPage(n),pageChanges=changes.filter(b=>b.page===n);let resources=cloneResources(page.node.Resources(),context,L);const slots=[],needsRemoval=pageChanges.some(b=>b.ops?.length),source=collectContent(page.node.get(L.PDFName.of('Contents')),context,L),tree=needsRemoval?buildTree(source,resources,{size:0,spacing:0,word:0,fontObject:null,fontDict:null},context,L,slots):{source,resources,patches:[],forms:[]};const ops=data.info.ops;if(needsRemoval&&slots.length!==ops.length)throw new Error(`Page ${n} has a text structure that cannot be mapped safely. No image conversion was performed.`);const byIndex=new Map(),fontMaps=new Map(),inPlace=new Set();const matrixPatches=[];if(needsRemoval){for(let i=0;i<slots.length;i++){const slot=slots[i],info=ops[i];const pair=decodeGlyphs(slot,info,L),map=fontMaps.get(slot.fontDict)||new Map();fontMaps.set(slot.fontDict,map);pair.glyphs.forEach((glyph,j)=>{if(glyph.unicode&&!map.has(glyph.unicode))map.set(glyph.unicode,{bytes:pair.decoded[j],unitWidth:glyph.width*(info.font.fontMatrix?.[0]??.001)})});byIndex.set(info.index,{slot,info,map})}for(const block of pageChanges){
@@ -518,4 +495,4 @@ const saved=saveTree(tree,context,L,counter);if(saved.resources)resources=saved.
  // The header written by the PDF library is 1.7; a catalog /Version left at
  // 1.4 would describe the file as an older document than its own structure.
  ensureCatalogVersion(output,'1.7',L);
- return alignHeader(await output.save({useObjectStreams:true,addDefaultPage:false}),original)}
+ return alignHeader(await output.save({useObjectStreams:true,addDefaultPage:false}),headerDonor)}
