@@ -373,7 +373,7 @@ function metadataUploadStatus(){
  if(!uploadedMetadata){$('metadata-upload-status').textContent='No metadata replacement loaded. The source PDF’s native Info/XMP is retained.';return}
  const info=uploadedMetadata.fields.length?`Its ${uploadedMetadata.fields.length} Info field${uploadedMetadata.fields.length===1?'':'s'} replace PDF Info: ${describeMetadataFields(uploadedMetadata)}.`:'It removes the PDF Info dictionary.';
  const xmp=uploadedMetadata.xmpRaw?'The supplied XMP replaces existing XMP.':'Existing XMP is removed.';
- const kind=uploadedMetadata.format==='sidecar'?' Source file report recognised; file hashes and structure are stored as Source… custom Info fields.':'';
+ const kind=uploadedMetadata.format==='sidecar'?' Source file report recognised; its real PDF fields are applied and file hashes/structure are ignored.':'';
  $('metadata-upload-status').textContent=`${uploadedMetadata.name} (${formatBytes(uploadedMetadata.byteLength)}) loaded for export. ${info} ${xmp} Omitted original fields are removed.${kind}${uploadedMetadata.ignored.length?' Non-metadata PDF structure fields were ignored.':''}`;
 }
 function invalidateCurrentExportFingerprint(){
@@ -463,7 +463,7 @@ async function inspectEncryptMetadata(){
   const data=new Uint8Array(await file.arrayBuffer());
   if(version!==encryptMetadataVersion)return;
   const parsed=parseUploadedMetadata(data,file.name);
-  setEncryptMetadataStatus(`${parsed.name} loaded: ${parsed.fields.length} PDF Info field${parsed.fields.length===1?'':'s'} (${describeMetadataFields(parsed)})${parsed.xmpRaw?' and replacement XMP':''}. These become the encrypted PDF’s native Info${parsed.xmpRaw?' and XMP':''}; the JSON file is not attached.${parsed.format==='sidecar'?' Source file report recognised: file hashes and structure are stored as Source… custom fields.':''}`);
+  setEncryptMetadataStatus(`${parsed.name} loaded: ${parsed.fields.length} PDF Info field${parsed.fields.length===1?'':'s'} (${describeMetadataFields(parsed)})${parsed.xmpRaw?' and replacement XMP':''}. These become the encrypted PDF’s native Info${parsed.xmpRaw?' and XMP':''}; the JSON file is not attached.${parsed.format==='sidecar'?' Source file report recognised: its real PDF fields are applied and file hashes/structure are ignored.':''}`);
  }catch(error){
   if(version!==encryptMetadataVersion)return;
   error.metadataError=true;

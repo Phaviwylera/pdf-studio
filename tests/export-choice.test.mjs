@@ -168,7 +168,7 @@ test('Export PDF asks for a regular or encrypted copy before any download', asyn
  assert.match(html, /id="export-password-fields" hidden/);
  assert.match(html, /<label>Open password<input id="export-password" type="password" autocomplete="new-password" minlength="8">/);
  assert.match(html, /<label>Confirm open password<input id="export-confirm" type="password" autocomplete="new-password" minlength="8">/);
- assert.match(html, /<label>Owner password <span class="small">Optional; leave blank to use the open password<\/span><input id="export-owner" type="password" autocomplete="new-password" minlength="8">/);
+ assert.match(html, /<label>Owner password <span class="small">Optional; leave blank to generate one, so the open password cannot change permissions<\/span><input id="export-owner" type="password" autocomplete="new-password" minlength="8">/);
  assert.match(html, /id="export-submit" class="primary">Export PDF/);
  assert.match(html, /signed and view-only documents skip the export choice entirely/i);
  assert.match(app, /\$\('export'\)\.onclick=openExportOptions/);

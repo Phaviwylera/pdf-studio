@@ -103,7 +103,7 @@ test('native export embeds the source font for characters outside the page encod
  }
  assert.equal(fontFile2, 1, 'the original embedded font is reused instead of dropping unsupported letters');
  const content = await pageContent(output);
- assert.match(content, /PSEditFont\d+ 12 Tf/);
+ assert.match(content, /\/F\d+ 12 Tf/);
  assert.match(content, /\[<[0-9A-F]+> -\d+(?:\.\d+)? <[0-9A-F]+>\] TJ/, 'the word gap is drawn without a notdef space glyph');
  assert.doesNotMatch(content, /hello/);
 });

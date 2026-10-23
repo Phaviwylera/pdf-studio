@@ -26,9 +26,20 @@ No-change downloads preserve the original bytes unless a metadata replacement JS
 
 **Export PDF** on an editable document opens an export choice. **Regular export** downloads the normal native PDF. **AES-256 password-protected export** first creates that same native export — including applied edits and any loaded metadata replacement — and then passes exactly those bytes to the existing `encryptPdfCopy` function. The protected result downloads with `-encrypted.pdf` in its name (for example `statement-edited-encrypted.pdf`).
 
-Encryption asks for an open password and a matching confirmation, each at least 8 characters, plus an optional owner password (at least 8 characters and different from the open password; blank uses the open password). Everything runs in this browser: passwords are not uploaded, logged or persisted, are used only for that export, and the password fields are cleared after the attempt and whenever the dialog closes. Lost passwords cannot be recovered.
+Encryption asks for an open password and a matching confirmation, each at least 8 characters, plus an optional owner password (at least 8 characters and different from the open password; leave it blank and a random owner password is generated). The open password never doubles as the owner password, so knowing it cannot lift the permission flags, and the export marks modification, annotation, form filling and assembly as disallowed while printing, copying and accessibility extraction stay allowed. Everything runs in this browser: passwords are not uploaded, logged or persisted, are used only for that export, and the password fields are cleared after the attempt and whenever the dialog closes. Lost passwords cannot be recovered.
 
 Signed and view-only documents bypass the export choice: **Export PDF** (shown as **Download original**) downloads the exact uploaded bytes unchanged. **Hash original** also keeps fingerprinting the exact uploaded bytes, even when a password-protected document has been unlocked into an editable working copy. The standalone **Encrypt PDF** action remains independent of the open document and of this export choice.
+
+### Export fingerprints
+
+Statements and other bank-issued PDFs are often re-checked with a tamper validator. The export deliberately avoids the artefacts such a check reports:
+
+- **No duplicate typeface copies.** Edited text is drawn with the font object the PDF already embeds, under the resource name the page already gives it. A second program is embedded only for a font the document does not contain, and an unchanged-style edit is written into the original text operator instead of adding a font at all.
+- **No editor-specific font names.** New resources are named `F1`, `F2`, … (forms `Fm1`, …) rather than `PSEditFont<n>` / `PSDocFont<n>`.
+- **No source descriptors.** Exports carry no `Source*` Info keys and no embedded source-metadata attachment.
+- **No deleted-text traces.** Removing a text block deletes the showing operation; a spacing-only `[<n>] TJ` remains only when later text on the same line depends on the pen position.
+- **Consistent version and encryption.** AES-256 is only written into files whose header and catalog `/Version` are at least 1.7; the native export raises a stale catalog `/Version` to 1.7 as well.
+- **A separate owner password.** Leaving the owner password blank generates a random one, so the opening password cannot also unlock editing.
 
 ### Typography consistency
 
@@ -85,7 +96,7 @@ Restoring the identifier does not restore the original fingerprint: text edits, 
 
 ## Source metadata
 
-After opening a PDF, click **Metadata** to inspect and download a JSON record of its native PDF Info fields (including custom fields) and XMP XML, when available. Calculated PDF.js document properties are not shown as Info metadata. Without a replacement upload, an edited native export preserves the source PDF's Info dictionary and XMP stream and embeds `pdf-studio-source-metadata.json` as a provenance attachment. An unchanged download remains byte-for-byte original.
+After opening a PDF, click **Metadata** to inspect and download a JSON record of its native PDF Info fields (including custom fields) and XMP XML, when available. Calculated PDF.js document properties are not shown as Info metadata. Without a replacement upload, an edited native export preserves the source PDF's Info dictionary and XMP stream and attaches nothing: the record stays a separate JSON download. An unchanged download remains byte-for-byte original.
 
 To **replace the PDF's native metadata**, choose a UTF-8 `.json` file (up to 8 MB) in the Metadata dialog. You can use the JSON downloaded from this app, a flat object such as `{"Title":"New title","Author":"Name","Custom":{"Project":"123"}}`, or `{"info":{"Title":"New title"},"xmp":{"raw":"<x:xmpmeta ...>...</x:xmpmeta>"}}` with valid XMP XML. The supplied Info fields replace the entire old document Info dictionary; fields not included are removed. The supplied `xmp.raw` replaces the catalog XMP stream; if absent, that XMP entry is removed. This is not secure redaction of old values copied elsewhere in the PDF (such as page-level metadata or existing attachments). Standard text fields, PDF dates, Trapped, and scalar custom Info fields are supported. Text fields also accept a list of names, which is joined into one string. A downloader **sidecar file report** is also accepted:
 
@@ -96,7 +107,7 @@ To **replace the PDF's native metadata**, choose a UTF-8 `.json` file (up to 8 M
 }
 ```
 
-Its mapping is: `metadata` keys that name standard PDF fields (`Title`, `Author`, `Subject`, `Keywords`, `Creator`, `Producer`, `CreationDate`, `ModDate`, `Trapped`) become those native Info fields; `metadata.version`, `pages`, `encrypted` and `decrypted` become the custom fields `SourcePDFVersion`, `SourcePageCount`, `SourceEncrypted` and `SourceDecrypted`; `file.name` and `file.sizeBytes` become `SourceFilename` and `SourceFileSizeBytes`; each `file.hashes` entry becomes `SourceSHA1`, `SourceSHA256`, `SourceSHA384`, `SourceSHA512`, etc.; other scalar `file` values become `Source<Key>`. Optional top-level `xmp` works as above. In a flat object, every top-level key except `xmp`/`XMP` and `Custom` is treated as an Info field. Other nested objects and arrays have no native PDF Info representation: the error names the exact JSON field and received type, and an encryption attempt offers **Encrypt without metadata** instead of silently dropping values. PDF.js-derived properties (page count, PDF version, encryption, signatures, etc.) are not writable metadata; they are ignored in an app-generated report or rejected in other files. Unsupported values are rejected rather than silently inserted. The source provenance attachment and uploaded JSON are **not** newly attached when overriding metadata.
+Its mapping is: `metadata` keys that name standard PDF fields (`Title`, `Author`, `Subject`, `Keywords`, `Creator`, `Producer`, `CreationDate`, `ModDate`, `Trapped`) become those native Info fields. Source-side details are validated and then ignored rather than written: `metadata.version`, `pages`, `encrypted` and `decrypted`, and everything under `file` (name, size, hashes), never become Info fields, and no `Source…` key is written. A PDF whose Info names the document it came from reads as a re-saved copy to validators, so this editor does not create those fields. Optional top-level `xmp` works as above. In a flat object, every top-level key except `xmp`/`XMP` and `Custom` is treated as an Info field. Other nested objects and arrays have no native PDF Info representation: the error names the exact JSON field and received type, and an encryption attempt offers **Encrypt without metadata** instead of silently dropping values. PDF.js-derived properties (page count, PDF version, encryption, signatures, etc.) are not writable metadata; they are ignored in an app-generated report or rejected in other files. Unsupported values are rejected rather than silently inserted. The uploaded JSON is **not** attached to the export.
 
 After a successful upload, the Metadata dialog keeps the selected filename visible and confirms that the replacement is loaded for export. The replacement is kept in browser memory for the current document, can be removed before export, and is cleared when another PDF opens. Even with no text edits, replacing metadata rewrites the PDF and changes its size and hashes. This is descriptive metadata, **not** a digital signature or proof of issuer identity. Signed or uninspectable PDFs remain view-only in the editor. Password-protected PDFs can be opened with their password and are decrypted to an editable working copy in-browser with qpdf compiled to WebAssembly. The uploaded bytes are never modified. If qpdf cannot safely decrypt a PDF, it stays view-only. This metadata-replacement flow does not extract certificates.
 
@@ -108,7 +119,7 @@ Optionally choose a UTF-8 `.json` metadata file (up to 8 MB) to **replace the PD
 
 Downloads use a blob link appended to the page. After any download the app shows a **Download ready** panel with the filename, size, a **Save again** link, an **Open file** link, and — inside an embedded preview — **Open app in new tab**. Embedded preview frames can block automatic downloads even when the file was created successfully; use that panel or open the app in its own tab and retry there.
 
-Run metadata, typography, export-choice, encryption, decryption, file-identifier, font-inventory, fingerprint and module-wiring regression tests with `node --test tests/*.test.mjs` (Node.js required only for tests). Typography tests cover 0.001 pt normalization, glyph-advance layout without kerning, word/letter spacing, paint modes, stroke weight and baseline placement. Syntax-check the runtime and test modules with `node --check dist/*.mjs` and `node --check tests/*.mjs` before running the suite.
+Run metadata, typography, export-choice, encryption, decryption, file-identifier, font-inventory, export-fingerprint, hash-fingerprint and module-wiring regression tests with `node --test tests/*.test.mjs` (Node.js required only for tests). Typography tests cover 0.001 pt normalization, glyph-advance layout without kerning, word/letter spacing, paint modes, stroke weight and baseline placement. Syntax-check the runtime and test modules with `node --check dist/*.mjs` and `node --check tests/*.mjs` before running the suite.
 
 ## Protection and signing
 
@@ -126,8 +137,9 @@ New signed copies use an authorized user-provided RSA 2048+ PFX/P12 certificate 
 - `dist/vendor/qpdf/`: qpdf 11.0.0 WebAssembly runtime and Apache-2.0 license.
 - `dist/typography.mjs`: the shared typography model (0.001 pt measures, glyph advances, spacing, paint modes, stroke weight and baseline placement).
 - `dist/positioning.mjs`: axis-lock helpers.
-- `dist/metadata.mjs`: source metadata report, Info/XMP replacement or preservation, and optional provenance attachment.
+- `dist/metadata.mjs`: source metadata report, Info/XMP replacement or preservation, and the opt-in provenance attachment.
 - `dist/file-id.mjs`: trailer `/ID` capture, encoding-preserving restore and export verification.
+- `dist/pdf-version.mjs`: header and catalog `/Version` inspection and raising (AES-256 needs 1.7).
 - `dist/font-identity.mjs`: Arial/Helvetica family, style and subset-name recognition.
 - `dist/font-coverage.mjs`: embedded-font character coverage, missing-glyph reporting and mixed font-run selection for canvas previews.
 - `dist/font-inventory.mjs`: per-page `/Font` inventory, typeface identity, page-1 program detection and cross-page reuse.

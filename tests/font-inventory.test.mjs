@@ -216,6 +216,7 @@ test('page 1\'s font dictionary is reused on another page without re-embedding i
 
  const output = await L.PDFDocument.load(exported, {updateMetadata: false});
  const fonts = output.getPage(1).node.Resources().lookup(L.PDFName.of('Font'), L.PDFDict);
+ const before = [...(await L.PDFDocument.load(bytes, {updateMetadata: false})).getPage(1).node.Resources().lookup(L.PDFName.of('Font'), L.PDFDict).keys()].map(key => key.toString());
  const pages = new Set(output.getPageCount() === 2 ? [0, 1] : []);
  assert.ok(pages.size === 2);
  // Both pages now point at the very same font object, so the program is not embedded twice.
@@ -226,6 +227,10 @@ test('page 1\'s font dictionary is reused on another page without re-embedding i
 
  const stream = output.context.lookup(output.getPage(1).node.get(L.PDFName.of('Contents')));
  const text = Buffer.from(L.decodePDFRawStream(stream).decode()).toString('latin1');
- assert.match(text, /\/PSEditFont\d+ [\d.]+ Tf/, 'the reused font is selected in the new content stream');
+ // The page already names this font, so that name is reused and no second
+ // resource (and no second typeface copy) is added.
+ assert.deepEqual([...fonts.keys()].map(key => key.toString()).sort(), before.sort(), 'no extra font resource is added');
+ const selected = /(\/[A-Za-z0-9#_.+-]+) [\d.]+ Tf/.exec(text);
+ assert.ok(selected && before.includes(selected[1]), 'the reused font is selected in the new content stream');
  assert.match(text, /TJ/, 'the text is drawn with the reused font codes');
 });

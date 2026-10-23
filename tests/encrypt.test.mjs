@@ -206,12 +206,12 @@ test('sidebar-style file metadata JSON is applied to the encrypted PDF', async (
  const pdf = await L.PDFDocument.load(prepared, {updateMetadata: false});
  assert.equal(pdf.getProducer(), 'openhtmltopdf.com');
  assert.equal(pdf.getTitle(), undefined); // Omitted original Info fields are removed.
- assert.equal(infoEntries(pdf)['/SourcePageCount'], '15');
- assert.equal(infoEntries(pdf)['/SourceEncrypted'], 'true');
- assert.equal(infoEntries(pdf)['/SourceFilename'], L.PDFHexString.fromText('62271XXXX_DownloadStatement_1792215212.pdf').toString());
+ assert.equal(infoEntries(pdf)['/SourcePageCount'], undefined);
+ assert.equal(infoEntries(pdf)['/SourceEncrypted'], undefined);
+ assert.equal(infoEntries(pdf)['/SourceFilename'], undefined);
  assert.equal(pdf.catalog.get(key('Names')), undefined);
  assert.match(decode(encrypted), /\/Encrypt/);
  const encryptedPdf = await L.PDFDocument.load(encrypted, {ignoreEncryption: true, updateMetadata: false});
- assert.ok(Object.keys(infoEntries(encryptedPdf)).includes('/SourceSHA256'), 'sidecar fields survive in the encrypted Info dictionary');
+ assert.equal(infoEntries(encryptedPdf)['/SourceSHA256'], undefined, 'source descriptors are never written');
  assert.ok(Object.keys(infoEntries(encryptedPdf)).includes('/Producer'));
 });
