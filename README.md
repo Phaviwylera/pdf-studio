@@ -111,6 +111,16 @@ Repeated page headers, "Page 3 of 24" lines and column titles are not transactio
 
 `dist/statement-check.mjs` is pure and testable without a browser: `parseAmount`, `parseDate`, `formatAmountLike`, `groupRows`, `classifyRow`, `narrationCode`, `extractStatementRows`, `checkStatement`, `formatReport`.
 
+When a statement's columns are unusual, describe the layout without revealing the figures:
+
+```sh
+node tools/statement-layout.mjs statement.pdf           # digits masked
+node tools/statement-layout.mjs statement.pdf --json    # machine-readable
+node tools/statement-layout.mjs statement.pdf --reveal   # full text, for your own use
+```
+
+It prints the page size, how many rows were found, the numeric column positions with the shape of the numbers in each (`#,###.## Dr`), whether the balance column is right-aligned, and a few masked sample rows. A password-protected PDF has to be saved as an unencrypted copy first; the editor can open the protected file with its password.
+
 ## Source metadata
 
 After opening a PDF, click **Metadata** to inspect and download a JSON record of its native PDF Info fields (including custom fields) and XMP XML, when available. Calculated PDF.js document properties are not shown as Info metadata. Without a replacement upload, an edited native export preserves the source PDF's Info dictionary and XMP stream and attaches nothing: the record stays a separate JSON download. An unchanged download remains byte-for-byte original.
@@ -136,7 +146,7 @@ Optionally choose a UTF-8 `.json` metadata file (up to 8 MB) to **replace the PD
 
 Downloads use a blob link appended to the page. After any download the app shows a **Download ready** panel with the filename, size, a **Save again** link, an **Open file** link, and — inside an embedded preview — **Open app in new tab**. Embedded preview frames can block automatic downloads even when the file was created successfully; use that panel or open the app in its own tab and retry there.
 
-Run metadata, typography, export-choice, encryption, decryption, file-identifier, font-inventory, export-fingerprint, statement-check, hash-fingerprint and module-wiring regression tests with `node --test tests/*.test.mjs` (Node.js required only for tests). Typography tests cover 0.001 pt normalization, glyph-advance layout without kerning, word/letter spacing, paint modes, stroke weight and baseline placement. Syntax-check the runtime and test modules with `node --check dist/*.mjs` and `node --check tests/*.mjs` before running the suite.
+Run metadata, typography, export-choice, encryption, decryption, file-identifier, font-inventory, export-fingerprint, statement-check, statement-layout, hash-fingerprint and module-wiring regression tests with `node --test tests/*.test.mjs` (Node.js required only for tests). Typography tests cover 0.001 pt normalization, glyph-advance layout without kerning, word/letter spacing, paint modes, stroke weight and baseline placement. Syntax-check the runtime and test modules with `node --check dist/*.mjs` and `node --check tests/*.mjs` before running the suite.
 
 ## Protection and signing
 
@@ -163,6 +173,7 @@ New signed copies use an authorized user-provided RSA 2048+ PFX/P12 certificate 
 - `dist/font-inventory.mjs`: per-page `/Font` inventory, typeface identity, page-1 program detection and cross-page reuse.
 - `dist/document-font.mjs`: existing font-dictionary reuse, `ToUnicode` code maps, CID widths and the encoder used for the reused font.
 - `tools/font-report.mjs`: command-line font report for a PDF (no browser required).
+- `tools/statement-layout.mjs`: command-line statement layout report (columns, rows, number shapes, digits masked by default).
 - `dist/signing.mjs`: PFX/P12 handling, signed-copy creation and fingerprints.
 - `dist/vendor/`: bundled PDF.js, pdf-lib, fontkit, Forge and supporting assets, plus `pdf-encrypt/` (@pdfsmaller/pdf-encrypt 1.2.0, MIT) for AES-256 PDF security and `qpdf/` (qpdf 11.0.0, Apache-2.0) for in-browser decryption.
 
