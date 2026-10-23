@@ -154,7 +154,10 @@ test('typography rules are shared by the editor preview, inline editor and expor
  assert.match(app, /function shapeLine\(/);
  assert.match(app, /function naturalWidth\(ctx,b,text\)\{return shapeLine\(ctx,\{\.\.\.b,spacing:0,wordSpacing:0\},text\)\.width\}/);
  assert.match(app, /b\.scaleX=w>0\?b\.width\/w:1/);
- assert.equal((app.match(/naturalWidth\(/g) || []).length, 3, 'one helper plus both scaleX sites use the unspaced advance');
+ assert.equal((app.match(/naturalWidth\(/g) || []).length, 2, 'the helper and the one place a block\'s correction is measured');
+ // An edit keeps the block's own horizontal correction: recomputing it for the
+ // new text is how a squeezed run got into the export.
+ assert.match(app, /e\.scaleX=Number\.isFinite\(orig\?\.scaleX\)&&orig\.scaleX>0\?orig\.scaleX/);
  assert.match(app, /gap=\(\(b\.spacing\|\|0\)\+\(prefix\.endsWith\(' '\)\?\(b\.wordSpacing\|\|0\):0\)\)\*b\.scaleX/);
  assert.match(app, /canvasStrokeWidth\(b\.strokeWidth/);
  assert.match(app, /strokeWidth=Math\.max\(\.01,canvasStrokeWidth\(b\.strokeWidth\?\?1,sx,1\)\*z\)/, 'the inline editor compensates the same horizontal scale as the canvas preview');

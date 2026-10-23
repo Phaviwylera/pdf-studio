@@ -56,13 +56,19 @@ The preview, the in-place editor and native export share one typography model, s
 - Original horizontal scaling is captured once as a horizontal text scale. Stroke weight is compensated for that scale in the preview so it matches the exported `w` value in page points.
 - The text color control is the fill color. For stroke-only text it shows and edits the stroke color instead, so the visible color never sits in a hidden channel; fill + stroke text keeps its separately captured stroke color. Underlines follow the visible paint channel.
 
+- An edited value is written at the width its own glyph advances give it. It is never squeezed into the width of the value it replaces: the browser's measurement correction (`width ÷ canvas width`) belongs to the preview, and writing it into the page produces a text matrix with a fractional horizontal scale that no producer writes and a forensic check reads as an edit.
+- A value that grows or shrinks keeps the right edge of its column (money stays aligned); prose keeps its left edge. The replacement reuses the matrix the producer already wrote for that run, so the text object keeps one placement instead of gaining a second.
+- An edit that changes neither width nor position is written into the original text-showing operation, leaving the operator sequence byte-for-byte the same apart from the glyphs.
+
 If a text block mixes paint modes, stroke weights, colors, spacing or text rise between its text-show operators, it is treated as inspection-only rather than exporting a guessed style. Complex-script shaping is outside this model.
 
 ### Original fonts
 
 When a PDF embeds a font program, the editor registers that program for the document and uses it for the live preview, the in-place text box, and export, so typed capitals, digits and other characters render in the PDF's own typeface instead of the browser fallback. Coverage is checked against the whole embedded font, not only the glyphs observed on the page you are editing: a character that appears in a heading on page 3 is available when editing page 1 of the same document.
 
-Most PDF producers embed only a **subset** of the font — the glyphs actually used somewhere in that document. Characters that are absent from the subset cannot be drawn with the original font; the editor then names the missing characters and uses a substitute for the edit (or a loaded TTF/OTF) rather than exporting blank glyphs. To recover those characters, load the full TTF/OTF in **Available font → Load font file** and choose **Best font match**. Standard PDF fonts without an embedded program (Helvetica, Times, Courier) use the bundled standard-font program that PDF.js loads (Liberation in this build) for typed text, with family substitutes only when a character is absent.
+Most PDF producers embed only a **subset** of the font — the glyphs actually used somewhere in that document. Characters that are absent from the subset cannot be drawn with the original font; the editor then names the missing characters and uses a substitute for the edit (or a loaded TTF/OTF) rather than exporting blank glyphs. To recover those characters, load the full TTF/OTF in **Available font → Load font file** and choose **Best font match**. Standard PDF fonts without an embedded program (Helvetica, Times, Courier) use the bundled standard-font program that PDF.js loads (Liberation in this build) for typed text, with family substitutes only when a character is absent.Most PDF producers embed only a **subset** of the font — the glyphs actually used somewhere in that document. Characters that are absent from the subset cannot be drawn with the original font; the editor then names the missing characters and uses a substitute for the edit (or a loaded TTF/OTF) rather than exporting blank glyphs. To recover those characters, load the full TTF/OTF in **Available font → Load font file** and choose **Best font match**. Standard PDF fonts without an embedded program (Helvetica, Times, Courier) use the bundled standard-font program that PDF.js loads (Liberation in this build) for typed text, with family substitutes only when a character is absent.
+
+When the page's own subset cannot write a character of the replacement, the export looks for the same program elsewhere in the document — the whole subset is mapped by its `ToUnicode`, while the page itself only showed some of those glyphs — and writes the text with it **in the same operation**, in the same text object, at the same matrix. It never appends a second, separately typed text object at the end of the page: a re-typed block is the one shape a reader or a forensic check can always spot.
 
 ### Fonts across all pages
 
@@ -103,9 +109,20 @@ Restoring the identifier does not restore the original fingerprint: text edits, 
 - **Running balance.** Each row's balance must equal the previous balance plus its amount (Cr positive, Dr negative). The opening balance is taken from an opening row, or — when the first row carries an amount — from that row's balance minus its amount, using the values before any edit.
 - **Closing total.** The last balance minus the opening balance must equal credits minus debits.
 - **Date order.** A row dated earlier than the row above it is reported as suspicious.
-- **Direction per narration code.** A code such as `UPAR`, `NEFT` or `IMPS` keeps one direction across a statement; a row whose Dr/Cr contradicts the code's usual direction is reported, with the count it contradicts.
+- **Direction per narration code.** A code such as `UPAR`, `NEFT` or `IMPS` keeps one direction across a statement; a row whose Dr/Cr contradicts the code's usual direction is reported, with the count it contradicts. Reversals, refunds, returns and chargebacks are exempt, because coming back the other way is what they are.
 
-Repeated page headers, "Page 3 of 24" lines and column titles are not transactions: rows without a date that repeat on more than one page are counted once.
+The table is read the way the page draws it:
+
+- **Columns are found, not assumed.** The amount and balance columns are the two rightmost runs of numbers shared by the rows that carry a date, so a page footer ("Page 2 of 24"), a CIF or account number, a heading and a column title cannot become a balance. A transaction row whose numbers sit outside the columns is still read on its own geometry.
+- **Ids are not money.** `Y64949982` (transaction id), `UBIN0557048` (IFSC) and `570402010010517` (account number) are rejected as amounts: a currency prefix has to be a symbol or a three-letter code, and a run of more than 13 digits is a reference, not a value.
+- **Both directions are understood.** `1,234.56 Dr`, `1,234.56 CR`, `12.00(Dr)`, `12.00 (Cr)`, `(1,000.00)` and `AED 1,234.56 Cr` all read the same way, and a correction is written back in whichever shape the cell already used.
+- **The narration is the remarks column.** A reference number beside it is dropped, so the code that starts the remarks (`UPIAR/…`, `IMPSAB/…`) is what the direction check compares.
+- **The remarks and the amount must agree.** Banks print the direction twice, once in the remarks (`UPIAR/…/DR/…`) and once after the amount (`300.00(Dr)`). Changing an amount from debit to credit without changing the remarks leaves the row self-contradictory, so it is reported as `narration says /DR/ but the amount 50.00(Cr) is marked CR`. Nothing is rewritten to hide it.
+- **Edited amounts are listed.** Each amount that differs from the document's original is named, with the value it replaced, so it is clear which numbers the balances were rebuilt from.
+
+Repeated page headers, "Page 3 of 24" lines and column titles are not transactions: a page label is skipped even when its digits are the only numbers on the line, and a row without a date that repeats on more than one page is counted once.
+
+An edited amount moves every balance after it, so **Fix balances** can rewrite hundreds of cells on a long statement. Past 25 cells it asks before it starts, and records the whole run as one undo step.
 
 **Fix balances** rewrites only the balance cells that no longer follow from the amounts — the amounts stay as typed — using the same currency prefix, thousands separator, decimal places and Dr/Cr or parenthesis style as the cell it replaces. It records one undo step, refreshes the report, and marks the export as changed. Nothing is uploaded, saved or sent.
 
@@ -119,7 +136,7 @@ node tools/statement-layout.mjs statement.pdf --json    # machine-readable
 node tools/statement-layout.mjs statement.pdf --reveal   # full text, for your own use
 ```
 
-It prints the page size, how many rows were found, the numeric column positions with the shape of the numbers in each (`#,###.## Dr`), whether the balance column is right-aligned, and a few masked sample rows. A password-protected PDF has to be saved as an unencrypted copy first; the editor can open the protected file with its password.
+It prints the page size, how many rows were found, the amount and balance columns the checker would use, which numbers fall outside the table (page labels), the shape of the numbers in each column (`#,###.##(Dr)`), and a few masked sample rows. A password-protected PDF has to be saved as an unencrypted copy first; the editor can open the protected file with its password.
 
 ## Source metadata
 
@@ -146,7 +163,7 @@ Optionally choose a UTF-8 `.json` metadata file (up to 8 MB) to **replace the PD
 
 Downloads use a blob link appended to the page. After any download the app shows a **Download ready** panel with the filename, size, a **Save again** link, an **Open file** link, and — inside an embedded preview — **Open app in new tab**. Embedded preview frames can block automatic downloads even when the file was created successfully; use that panel or open the app in its own tab and retry there.
 
-Run metadata, typography, export-choice, encryption, decryption, file-identifier, font-inventory, export-fingerprint, statement-check, statement-layout, hash-fingerprint and module-wiring regression tests with `node --test tests/*.test.mjs` (Node.js required only for tests). Typography tests cover 0.001 pt normalization, glyph-advance layout without kerning, word/letter spacing, paint modes, stroke weight and baseline placement. Syntax-check the runtime and test modules with `node --check dist/*.mjs` and `node --check tests/*.mjs` before running the suite.
+Run metadata, typography, export-choice, in-place export, encryption, decryption, file-identifier, font-inventory, export-fingerprint, statement-check, statement-layout, hash-fingerprint and module-wiring regression tests with `node --test tests/*.test.mjs` (Node.js required only for tests). Typography tests cover 0.001 pt normalization, glyph-advance layout without kerning, word/letter spacing, paint modes, stroke weight and baseline placement. Syntax-check the runtime and test modules with `node --check dist/*.mjs` and `node --check tests/*.mjs` before running the suite.
 
 ## Protection and signing
 

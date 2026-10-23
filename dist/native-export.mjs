@@ -4,6 +4,7 @@ import {ensureCatalogVersion} from './pdf-version.mjs';
 import {applyFileId, sameFileId, fileIdFromDocument} from './file-id.mjs';
 import {readDocumentFont, documentFontEncoder} from './document-font.mjs';
 import {fontKey} from './font-inventory.mjs';
+import {parseAmount} from './statement-check.mjs';
 const WS=c=>c===0||c===9||c===10||c===12||c===13||c===32;
 const DELIM=c=>WS(c)||'()<>[]{}/%'.includes(String.fromCharCode(c));
 const ascii=bytes=>{let s='';for(let i=0;i<bytes.length;i+=8192)s+=String.fromCharCode(...bytes.subarray(i,i+8192));return s};
@@ -58,6 +59,10 @@ function patchInPlace(pairs,text,encoder,L){
  // horizontal squeeze, and a forensic check reads it as edited text. It is also
  // pointless when nothing follows on the line, so it is only written when later
  // text really depends on the pen position and the difference is noticeable.
+ // A value in a money column is placed by its right edge. Rewriting it inside the
+ // old show operation would leave the column ragged, so a value whose width
+ // changed is left to the caller, which moves it instead of squeezing it.
+ if(valueInColumn(text)&&Math.abs(widthUnits-total)>10)return null;
  if(!pairs.some(pair=>!deletable(pair.slot)))return `${prefix}${encoded.show||`<${encoded.hex}> Tj`}`;
  const adjust=Math.round((widthUnits-total)*1000)/1000;
  if(Math.abs(adjust)<Math.max(10,widthUnits*.02))return `${prefix}${encoded.show||`<${encoded.hex}> Tj`}`;
@@ -89,7 +94,7 @@ function deletable(slot){
 // the fonts that page already names. Only operators whose value differs from
 // what the producer left in effect are emitted, so the replacement keeps the
 // document's own operator vocabulary.
-function drawInPlace(block,segments,viewport,original){
+function drawInPlace(block,segments,viewport,original,matrixOp=null,matrixPatches=null){
  const inv=inverse(viewport.transform),lines=block.text.split('\n').filter(line=>line.length);
  if(!lines.length||!segments.length)return null;
  const differs=(key,fallback)=>String(block[key]??fallback)!==String(original?.[key]??fallback);
@@ -105,19 +110,29 @@ function drawInPlace(block,segments,viewport,original){
   content+=`${rgb(strokeHex).map(number).join(' ')} RG\n${number(block.strokeWidth??1)} w\n`;
  }
  for(const [index,line] of lines.entries()){
-  const x=alignedStart(segments[0].encoder,line,block),y=block.y+index*block.size*block.lineheight;
+  const y=block.y+index*block.size*block.lineheight;
   let lineSegments=segments;
   if(lines.length>1){
    // Multi-line blocks are written with the first segment's font; the caller
    // only offers more than one segment for a single line.
    lineSegments=[{...segments[0],text:line}];
   }
-  let cursor=x;
+  let cursor=placedStart(block,lineSegments,original);
   for(const segment of lineSegments){
    const encoded=segment.encoder(segment.text,block.size);
    if(differs('size',0)||segment.fontName!==original?.fontResourceName)content+=`${segment.fontName} ${number(block.size)} Tf\n`;
-   const matrix=compose(inv,[block.scaleX,0,0,-1,cursor,y]);
-   content+=`${matrix.map(number).join(' ')} Tm\n${encoded.show||`<${encoded.hex}> Tj`}\n`;
+   // The producer placed every value with a plain translation matrix. Write the
+   // replacement the same way, and write nothing at all when the pen is already
+   // there — a second matrix is what makes an edit stand out.
+   const where=index===0&&original&&Math.abs(cursor-Number(original.x))<1e-6&&Math.abs(y-Number(original.y))<1e-6;
+   if(!where){
+    const matrix=`${compose(inv,[1,0,0,-1,cursor,y]).map(number).join(' ')} Tm`;
+    // The producer already wrote a matrix for this run: give it the new value
+    // instead of leaving two, so the object still has one placement.
+    if(index===0&&matrixOp&&matrixPatches)matrixPatches.push({start:matrixOp.start,end:matrixOp.end,text:matrix});
+    else content+=`${matrix}\n`;
+   }
+   content+=`${encoded.show||`<${encoded.hex}> Tj`}\n`;
    cursor+=encoded.width;
   }
  }
@@ -140,7 +155,7 @@ function splitRuns(text,segments){
  }
  return runs;
 }
-function rewriteInPlace(pairs,block,fontResources,viewport,targets,original){
+function rewriteInPlace(pairs,block,fontResources,viewport,targets,original,matrixPatches=null){
  if(block.removed||!block.text||block.underline)return null;
  const first=pairs[0];if(!first)return null;
  // All runs of the block have to live in one content stream; their fonts may
@@ -168,20 +183,56 @@ function rewriteInPlace(pairs,block,fontResources,viewport,targets,original){
  // Tell the writer which font the object already had, so an unchanged font is
  // not restated: the replacement keeps the producer's exact operator sequence.
  const originalFontName=existingName(fontResources,first.slot.fontObject);
- try{return drawInPlace(block,segments,viewport,{...original,fontResourceName:originalFontName?originalFontName.toString():null})}catch{return null}
+ // A matrix can only be reused when the text object exists to place this one run.
+ const holder=first.slot.textObject;
+ const matrixOp=matrixPatches&&pairs.length===1&&holder&&holder.shows.length===1?first.slot.matrixAt:null;
+ try{return drawInPlace(block,segments,viewport,{...original,fontResourceName:originalFontName?originalFontName.toString():null},matrixOp,matrixPatches)}catch{return null}
 }
-function buildTree(source,resources,state,context,L,slots,ancestors=[],depth=0){if(depth>30)throw new Error('PDF form nesting is too deep.');const node={source,resources,patches:[],forms:[]};let current={...state},saves=[];node.operations=parseContent(source);for(const operation of node.operations){const a=operation.args;if(operation.op==='q')saves.push({...current});else if(operation.op==='Q')current=saves.pop()||current;else if(operation.op==='Tf'){const fonts=lookup(resources,'Font',L),key=a[0]?.value;const fontObject=fonts?.get(L.PDFName.of(key||''));current={...current,fontObject,fontDict:fontObject?context.lookup(fontObject,L.PDFDict):null,size:a[1]?.value}}else if(operation.op==='Tc')current.spacing=a[0]?.value;else if(operation.op==='Tw')current.word=a[0]?.value;else if(operation.op==='gs'){const ext=lookup(resources,'ExtGState',L),g=ext?.lookupMaybe(L.PDFName.of(a[0]?.value||''),L.PDFDict),font=g?.lookupMaybe(L.PDFName.of('Font'),L.PDFArray);if(font)current={...current,fontObject:font.get(0),fontDict:context.lookup(font.get(0),L.PDFDict),size:font.lookup(1,L.PDFNumber).asNumber()}}else if(['Tj','TJ',"'",'"'].includes(operation.op)){if(operation.op==='"'){current.word=a[0]?.value;current.spacing=a[1]?.value}if(!current.fontObject)throw new Error('PDF text has no resolvable font resource.');slots.push({node,operation,state:{...current},fontObject:current.fontObject,fontDict:current.fontDict})}else if(operation.op==='Do'){const xobjects=lookup(resources,'XObject',L),key=L.PDFName.of(a[0]?.value||''),ref=xobjects?.get(key),object=ref?context.lookup(ref):null;if(object instanceof L.PDFStream&&object.dict.get(L.PDFName.of('Subtype'))?.toString()==='/Form'){if(ancestors.includes(object))throw new Error('Recursive PDF form cannot be safely edited.');const childResources=lookup(object.dict,'Resources',L)||resources;const child=buildTree(ascii(getDecoded(object,L)),childResources,{...current},context,L,slots,[...ancestors,object],depth+1);node.forms.push({operation,object,child})}}}return node}
+function buildTree(source,resources,state,context,L,slots,ancestors=[],depth=0){if(depth>30)throw new Error('PDF form nesting is too deep.');const node={source,resources,patches:[],forms:[]};let current={...state},saves=[],textObject=null;node.operations=parseContent(source);for(const operation of node.operations){const a=operation.args;if(operation.op==='BT'){textObject={matrix:null,shows:[],moved:false}}
+if(operation.op==='q')saves.push({...current});else if(operation.op==='Q')current=saves.pop()||current;else if(operation.op==='Tf'){const fonts=lookup(resources,'Font',L),key=a[0]?.value;const fontObject=fonts?.get(L.PDFName.of(key||''));current={...current,fontObject,fontDict:fontObject?context.lookup(fontObject,L.PDFDict):null,size:a[1]?.value}}else if(operation.op==='Tc')current.spacing=a[0]?.value;else if(operation.op==='Tw')current.word=a[0]?.value;else if(operation.op==='gs'){const ext=lookup(resources,'ExtGState',L),g=ext?.lookupMaybe(L.PDFName.of(a[0]?.value||''),L.PDFDict),font=g?.lookupMaybe(L.PDFName.of('Font'),L.PDFArray);if(font)current={...current,fontObject:font.get(0),fontDict:context.lookup(font.get(0),L.PDFDict),size:font.lookup(1,L.PDFNumber).asNumber()}}else if(['Tj','TJ',"'",'"'].includes(operation.op)){if(operation.op==='"'){current.word=a[0]?.value;current.spacing=a[1]?.value}if(!current.fontObject)throw new Error('PDF text has no resolvable font resource.');if(textObject){textObject.shows.push(operation);if(operation.op==="'"||operation.op==='"')textObject.moved=true}slots.push({node,operation,state:{...current},fontObject:current.fontObject,fontDict:current.fontDict,textObject,matrixAt:textObject&&!textObject.moved?textObject.matrix:null})}else if(operation.op==='Tm'){if(textObject)textObject.matrix=operation}else if(operation.op==='Td'||operation.op==='TD'||operation.op==='T*'){if(textObject)textObject.moved=true}else if(operation.op==='Do'){const xobjects=lookup(resources,'XObject',L),key=L.PDFName.of(a[0]?.value||''),ref=xobjects?.get(key),object=ref?context.lookup(ref):null;if(object instanceof L.PDFStream&&object.dict.get(L.PDFName.of('Subtype'))?.toString()==='/Form'){if(ancestors.includes(object))throw new Error('Recursive PDF form cannot be safely edited.');const childResources=lookup(object.dict,'Resources',L)||resources;const child=buildTree(ascii(getDecoded(object,L)),childResources,{...current},context,L,slots,[...ancestors,object],depth+1);node.forms.push({operation,object,child})}}}return node}
 function applyPatches(source,patches){let text=source;for(const p of [...patches].sort((a,b)=>b.start-a.start))text=text.slice(0,p.start)+p.text+text.slice(p.end);return text}
 function saveTree(node,context,L,counter){let resources=null;const patches=[...node.patches];for(const form of node.forms){const child=saveTree(form.child,context,L,counter);if(!child.changed)continue;if(!resources)resources=cloneResources(node.resources,context,L);const dict=form.object.dict.clone(context);dict.delete(L.PDFName.of('Filter'));dict.delete(L.PDFName.of('DecodeParms'));dict.delete(L.PDFName.of('Length'));dict.set(L.PDFName.of('Resources'),child.resources||form.child.resources);const stream=context.flateStream(bytes(child.source));for(const [key,value] of dict.entries())stream.dict.set(key,value);const ref=context.register(stream),xs=lookup(resources,'XObject',L);const name=freshName(xs,'Fm',counter,L);xs.set(name,ref);patches.push({start:form.operation.start,end:form.operation.end,text:`${name.toString()} Do`})}return {changed:patches.length>0,source:applyPatches(node.source,patches),resources}}
 export function originalMissingChars(map,text){return [...new Set(Array.from(String(text??'').replace(/[\r\n]/g,'')))].filter(char=>!map?.has(char))}
 function originalEncoder(map,text,size){let encoded=[],width=0,count=0;const keys=[...map.keys()].sort((a,b)=>b.length-a.length);for(let i=0;i<text.length;){let match=keys.find(k=>text.startsWith(k,i));if(!match)throw new Error(`The original font cannot encode ${JSON.stringify(text[i])}. Choose an available font or load a TTF/OTF font; no image conversion was performed.`);const item=map.get(match);encoded.push(item.bytes);width+=item.unitWidth*size;count++;i+=match.length}return {hex:hex(concatenate(encoded)),width,count}}
+// A font dictionary this document already has can write the text with a plain
+// string. The producer's own operators use one, so a replacement does too: a
+// tokenised TJ is only needed when word spacing has to be written as an offset.
+export function documentHexEncoder(font){
+ const advance=code=>((font.widths.get(code)??font.defaultWidth)/1000);
+ return (text,size)=>{
+  const chars=Array.from(String(text??'').replace(/[\r\n]/g,''));
+  let hex='',width=0;
+  for(const char of chars){
+   const entry=font.codes.get(char);
+   if(!entry)throw new Error(`This PDF's embedded font has no character mapping for ${JSON.stringify(char)}.`);
+   hex+=entry.code;width+=advance(entry.code)*size;
+  }
+  return {hex,width,count:chars.length};
+ };
+}
 function standardName(block){const family=block.font==='original'?block.fallback:block.font;if(/Times|Georgia/.test(family))return block.bold?(block.italic?'Times-BoldItalic':'Times-Bold'):(block.italic?'Times-Italic':'Times-Roman');const mono=/Courier/.test(family),root=mono?'Courier':'Helvetica';return root+(block.bold?(block.italic?'-BoldOblique':'-Bold'):(block.italic?'-Oblique':''))}
-function textMetrics(encoder,text,block){const item=encoder(text,block.size),spaces=(String(text??'').match(/ /g)||[]).length;return {...item,width:(item.width+Math.max(0,item.count-1)*(block.spacing||0)+spaces*(block.wordSpacing||0))*block.scaleX}}
-export function alignedStart(encoder,line,b){if(b.align==='right')return b.x-textMetrics(encoder,line,b).width;if(b.align==='center')return b.x-textMetrics(encoder,line,b).width/2;if(b.align==='decimal'){const index=line.indexOf('.'),prefix=index<0?line:line.slice(0,index),gap=(b.spacing||0)+(prefix.endsWith(' ')?(b.wordSpacing||0):0);return b.x-textMetrics(encoder,prefix,b).width-(index>0?gap*b.scaleX:0)}return b.x}
+// The advance of a run as the document's own font defines it. block.scaleX is a
+// browser measurement correction (item.width / canvas width); writing it into the
+// page would squeeze the replacement into the old width, which is the one thing a
+// forensic check reads as an edit.
+function textMetrics(encoder,text,block){const item=encoder(text,block.size),spaces=(String(text??'').match(/ /g)||[]).length;return {...item,width:item.width+Math.max(0,item.count-1)*(block.spacing||0)+spaces*(block.wordSpacing||0)}}
+export function alignedStart(encoder,line,b){if(b.align==='right')return b.x-textMetrics(encoder,line,b).width;if(b.align==='center')return b.x-textMetrics(encoder,line,b).width/2;if(b.align==='decimal'){const index=line.indexOf('.'),prefix=index<0?line:line.slice(0,index),gap=(b.spacing||0)+(prefix.endsWith(' ')?(b.wordSpacing||0):0);return b.x-textMetrics(encoder,prefix,b).width-(index>0?gap:0)}return b.x}
+// A value in a right-aligned column ("300.00(Dr)") keeps the column's right edge
+// when it is rewritten, so the money column still lines up. Prose keeps its left
+// edge. Neither is stretched.
+function valueInColumn(text){return !!parseAmount(String(text??''))}
+function placedStart(block,segments,original){
+ const width=segments.reduce((total,segment)=>total+textMetrics(segment.encoder,segment.text,block).width,0);
+ if(block.align==='decimal')return block.x-width;
+ if(block.align==='right')return block.x-width;
+ if(block.align==='center')return block.x-width/2;
+ if(original&&Number(original.width)>0&&valueInColumn(original.text)&&valueInColumn(block.text))return original.x+Number(original.width)-width;
+ return block.x;
+}
 function inverse(m){const [a,b,c,d,e,f]=m,det=a*d-b*c;if(!det)throw new Error('Invalid PDF viewport.');return [d/det,-b/det,-c/det,a/det,(c*f-d*e)/det,(b*e-a*f)/det]}
 function compose(m,n){return [m[0]*n[0]+m[2]*n[1],m[1]*n[0]+m[3]*n[1],m[0]*n[2]+m[2]*n[3],m[1]*n[2]+m[3]*n[3],m[0]*n[4]+m[2]*n[5]+m[4],m[1]*n[4]+m[3]*n[5]+m[5]]}
 function rgb(color){if(!/^#[\da-f]{6}$/i.test(color))throw new Error('Invalid text color.');return [1,3,5].map(i=>parseInt(color.slice(i,i+2),16)/255)}
-function drawNative(block,encoder,fontName,viewport){if(block.removed||!block.text)return '';const color=rgb(block.color).map(number).join(' '),strokeHex=/^#[0-9a-f]{6}$/i.test(block.strokeColor||'')?block.strokeColor:block.color,strokeColor=rgb(strokeHex).map(number).join(' '),mode=[0,1,2].includes(Number(block.textMode))?Number(block.textMode):0,spacing=number(block.spacing||0),wordSpacing=number(block.wordSpacing||0),strokeWidth=number(block.strokeWidth??1),inv=inverse(viewport.transform);let content='';for(const [index,line] of block.text.split('\n').entries()){if(!line)continue;const x=alignedStart(encoder,line,block),y=block.y+index*block.size*block.lineheight,matrix=compose(inv,[block.scaleX,0,0,-1,x,y]);const encoded=encoder(line,block.size);
+function drawNative(block,encoder,fontName,viewport){if(block.removed||!block.text)return '';const color=rgb(block.color).map(number).join(' '),strokeHex=/^#[0-9a-f]{6}$/i.test(block.strokeColor||'')?block.strokeColor:block.color,strokeColor=rgb(strokeHex).map(number).join(' '),mode=[0,1,2].includes(Number(block.textMode))?Number(block.textMode):0,spacing=number(block.spacing||0),wordSpacing=number(block.wordSpacing||0),strokeWidth=number(block.strokeWidth??1),inv=inverse(viewport.transform);let content='';for(const [index,line] of block.text.split('\n').entries()){if(!line)continue;const x=alignedStart(encoder,line,block),y=block.y+index*block.size*block.lineheight,matrix=compose(inv,[1,0,0,-1,x,y]);const encoded=encoder(line,block.size);
  // Only the operators this block actually needs: default text state is left to
  // the viewer instead of being restated on every line.
  const state=`${fontName} ${number(block.size)} Tf\n${mode?`${mode} Tr\n`:''}${Number(spacing)?`${spacing} Tc\n`:''}${Number(wordSpacing)?`${wordSpacing} Tw\n`:''}${mode?`${strokeColor} RG\n${strokeWidth} w\n`:''}`;
@@ -262,11 +313,12 @@ export async function exportNativePdf({original,edits,getPage,fonts=new Map(),or
   try{const untouched=await L.PDFDocument.load(original.slice(),{updateMetadata:false});if(sameFileId(fileId,fileIdFromDocument(untouched,L)))return original.slice();applyFileId(untouched,fileId,L);return await untouched.save({useObjectStreams:true,addDefaultPage:false})}
   catch{return original.slice()}
  }
- let output;try{output=await L.PDFDocument.load(original.slice(),{updateMetadata:false})}catch(error){throw new Error('This PDF cannot be safely rewritten as native content. Open an unlocked PDF first. No image conversion was performed.')}if(signatureProtectionForDocument(output,L).locked)throw new Error('Signature protection is mandatory. This PDF contains a digital signature and cannot be edited. Export the original unchanged or have the issuer sign a new document.');const savedMetadata=capturePdfMetadata(output,L);if(fontkit)output.registerFontkit(fontkit);const context=output.context,fontCache=new Map(),counter={value:0},pages=[...new Set(changes.map(b=>b.page))];for(const n of pages){onProgress(`Exporting native text on page ${n}…`);const page=output.getPage(n-1),data=await getPage(n),pageChanges=changes.filter(b=>b.page===n);let resources=cloneResources(page.node.Resources(),context,L);const slots=[],needsRemoval=pageChanges.some(b=>b.ops?.length),source=collectContent(page.node.get(L.PDFName.of('Contents')),context,L),tree=needsRemoval?buildTree(source,resources,{size:0,spacing:0,word:0,fontObject:null,fontDict:null},context,L,slots):{source,resources,patches:[],forms:[]};const ops=data.info.ops;if(needsRemoval&&slots.length!==ops.length)throw new Error(`Page ${n} has a text structure that cannot be mapped safely. No image conversion was performed.`);const byIndex=new Map(),fontMaps=new Map(),inPlace=new Set();if(needsRemoval){for(let i=0;i<slots.length;i++){const slot=slots[i],info=ops[i];const pair=decodeGlyphs(slot,info,L),map=fontMaps.get(slot.fontDict)||new Map();fontMaps.set(slot.fontDict,map);pair.glyphs.forEach((glyph,j)=>{if(glyph.unicode&&!map.has(glyph.unicode))map.set(glyph.unicode,{bytes:pair.decoded[j],unitWidth:glyph.width*(info.font.fontMatrix?.[0]??.001)})});byIndex.set(info.index,{slot,info,map})}for(const block of pageChanges){
+ let output;try{output=await L.PDFDocument.load(original.slice(),{updateMetadata:false})}catch(error){throw new Error('This PDF cannot be safely rewritten as native content. Open an unlocked PDF first. No image conversion was performed.')}if(signatureProtectionForDocument(output,L).locked)throw new Error('Signature protection is mandatory. This PDF contains a digital signature and cannot be edited. Export the original unchanged or have the issuer sign a new document.');const savedMetadata=capturePdfMetadata(output,L);if(fontkit)output.registerFontkit(fontkit);const context=output.context,fontCache=new Map(),counter={value:0},pages=[...new Set(changes.map(b=>b.page))];for(const n of pages){onProgress(`Exporting native text on page ${n}…`);const page=output.getPage(n-1),data=await getPage(n),pageChanges=changes.filter(b=>b.page===n);let resources=cloneResources(page.node.Resources(),context,L);const slots=[],needsRemoval=pageChanges.some(b=>b.ops?.length),source=collectContent(page.node.get(L.PDFName.of('Contents')),context,L),tree=needsRemoval?buildTree(source,resources,{size:0,spacing:0,word:0,fontObject:null,fontDict:null},context,L,slots):{source,resources,patches:[],forms:[]};const ops=data.info.ops;if(needsRemoval&&slots.length!==ops.length)throw new Error(`Page ${n} has a text structure that cannot be mapped safely. No image conversion was performed.`);const byIndex=new Map(),fontMaps=new Map(),inPlace=new Set();const matrixPatches=[];if(needsRemoval){for(let i=0;i<slots.length;i++){const slot=slots[i],info=ops[i];const pair=decodeGlyphs(slot,info,L),map=fontMaps.get(slot.fontDict)||new Map();fontMaps.set(slot.fontDict,map);pair.glyphs.forEach((glyph,j)=>{if(glyph.unicode&&!map.has(glyph.unicode))map.set(glyph.unicode,{bytes:pair.decoded[j],unitWidth:glyph.width*(info.font.fontMatrix?.[0]??.001)})});byIndex.set(info.index,{slot,info,map})}for(const block of pageChanges){
    const pairs=(block.ops||[]).map(index=>byIndex.get(index));
    if(!pairs.length||pairs.some(pair=>!pair))throw new Error('The selected text operation cannot be safely removed.');
    const original=(data.blocks||[]).find(entry=>entry.id===block.id);
    if(!block.removed&&block.text){
+    matrixPatches.length=0;
     const sameStyle=sameTextStyle(block,original);
     let patched;
     if(sameStyle)patched=patchInPlace(pairs,block.text,text=>originalEncoder(pairs[0].map,text,pairs[0].slot.state.size),L);
@@ -291,9 +343,28 @@ export async function exportNativePdf({original,edits,getPage,fonts=new Map(),or
        targets.push({fontObject:ref,map:donor.codes,encoder:documentFontEncoder(donor,{wordSpacing:block.wordSpacing||0})});
       }
      }
-     patched=rewriteInPlace(pairs,block,lookup(resources,'Font',L),data.vp,targets,original);
+     patched=rewriteInPlace(pairs,block,lookup(resources,'Font',L),data.vp,targets,original,matrixPatches);
+     if(!patched&&block.font==='original'){
+      // A producer embeds only the glyphs that page drew, so the page's own
+      // program may lack a character of the replacement. Another page normally
+      // has the same typeface with that glyph: point at that program, keep the
+      // text object where the producer put it, and only fall back to a separate
+      // block when no program in the document can write the text.
+      const peers=documentFontCandidates(output,context,L,n-1),identity=fontKey(block.fontName||'');
+      const donor=peers.find(entry=>encodesAll(entry.font,block.text)&&(!identity||fontKey(entry.font.baseFont||'')===identity))||peers.find(entry=>encodesAll(entry.font,block.text));
+      if(donor){
+       const fontResources=lookup(resources,'Font',L),name=existingName(fontResources,donor.ref)||freshName(fontResources,'F',counter,L);
+       const added=!fontResources.has(name);
+       fontResources.set(name,donor.ref);
+       targets.push({fontObject:donor.ref,map:donor.font.codes,encoder:(block.wordSpacing||0)===0?documentHexEncoder(donor.font):documentFontEncoder(donor.font,{wordSpacing:block.wordSpacing})});
+       matrixPatches.length=0;
+       patched=rewriteInPlace(pairs,block,lookup(resources,'Font',L),data.vp,targets,original,matrixPatches);
+       if(!patched&&added)fontResources.delete(name);
+      }
+     }
     }
     if(patched){
+     for(const patch of matrixPatches)pairs[0].slot.node.patches.push(patch);
      pairs[0].slot.node.patches.push({start:pairs[0].slot.operation.start,end:pairs[0].slot.operation.end,text:patched});
      for(const pair of pairs.slice(1))pair.slot.node.patches.push({start:pair.slot.operation.start,end:pair.slot.operation.end,text:''});
      inPlace.add(block.id);
