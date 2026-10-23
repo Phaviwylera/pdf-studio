@@ -532,7 +532,7 @@ function renderStatementReport(){
  if(!report)return;
  $('statement-info').textContent=formatReport(report);
  const fixes=report.fixes?.length||0;
- $('statement-status').textContent=report.empty?'No transaction rows were found. Statement check needs a table with dates, amounts and a running balance.':fixes?`${fixes} balance cell${fixes===1?'':'s'} do not follow from the amounts. Review them, then use Fix balances.`:'Every row adds up. The statement is arithmetically consistent.';
+ $('statement-status').textContent=report.empty?'No transaction rows were found. Statement check needs a table with dates, amounts and a running balance.':fixes?`${fixes} balance cell${fixes===1?'':'s'} do not follow from the amounts.${fixes>20?' An edited amount shifts every balance after it, so the fix runs to the end of the statement.':''} Review them, then use Fix balances.`:'Every row adds up. The statement is arithmetically consistent.';
  $('statement-apply').disabled=!fixes||signatureState.locked||busy;
  $('statement-apply').textContent=fixes?`Fix ${fixes} balance${fixes===1?'':'s'}`:'Balances already agree';
  $('statement-refresh').disabled=!doc;
@@ -561,6 +561,12 @@ async function openStatementCheck(){
 async function applyStatementFixes(){
  const fixes=statementReport?.fixes||[];
  if(!fixes.length||busy||statementChecking||signatureState.locked)return;
+ // One edited amount moves every balance after it, so a big statement can need
+ // hundreds of cells rewritten. Say so before touching the document.
+ if(fixes.length>25){
+  const pages=new Set(fixes.map(fix=>fix.page)).size;
+  if(!confirm(`This rewrites ${fixes.length} balance cells across ${pages} page${pages===1?'':'s'}, so every row after the edited amount adds up again. Continue?`))return;
+ }
  setBusy(true);
  try{
   const byPage=new Map();

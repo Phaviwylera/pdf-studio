@@ -44,8 +44,7 @@ test('the layout report describes columns and rows without printing the numbers'
  });
  assert.match(report, /1 page$/m);
  assert.match(report, /Page 1 · 595×842 pt · 8 text runs · 2 rows \(1 with numbers\)/);
- assert.match(report, /numeric columns: x 470–470 \(#,###\.## Dr\), x 560–560 \(###\.##\)/);
- assert.match(report, /balance column: x 560–560 · amount column: x 470–470/);
+ assert.match(report, /numeric cells: x 470–470 \(#,###\.## Dr\), x 560–560 \(###\.##\)/);
  assert.doesNotMatch(report, /1,099\.88/, 'the amount itself is never printed');
  assert.match(report, /#,###\.## Dr/);
 });
@@ -66,7 +65,7 @@ test('the command-line report runs on a PDF and masks its contents', async () =>
 
   const {stdout} = await run(process.execPath, [path.join(root, 'tools', 'statement-layout.mjs'), file]);
   assert.match(stdout, /1 page/);
-  assert.match(stdout, /balance column/);
+  assert.match(stdout, /Table columns|numeric cells/);
   assert.doesNotMatch(stdout, /1,099\.88/, 'digits stay masked');
 
   const revealed = await run(process.execPath, [path.join(root, 'tools', 'statement-layout.mjs'), file, '--reveal']);

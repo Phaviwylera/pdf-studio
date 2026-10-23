@@ -16,6 +16,7 @@
 import {readFile} from 'node:fs/promises';
 import path from 'node:path';
 import {createRequire} from 'node:module';
+import {detectColumns, parseDate} from '../dist/statement-check.mjs';
 
 const require = createRequire(import.meta.url);
 const L = require('../dist/vendor/pdf-lib.min.js');
@@ -125,8 +126,28 @@ async function extractPages(file) {
  return {pages, pageCount: document.getPageCount()};
 }
 
+/** The groups the checker would see, so the report describes the same table. */
+export function tableColumns(pages) {
+ const groups = pages.flatMap(page => rowsOf(page.items).map(row => ({blocks: row.items})));
+ const columns = detectColumns(groups);
+ const dated = groups.filter(group => group.blocks.some(block => parseDate(block.text)));
+ const numeric = groups.flatMap(group => group.blocks.filter(block => NUMBER.test(String(block.text || '').trim())).map(block => block.x));
+ return {columns, dated: dated.length, numeric};
+}
+
 export function layoutReport({pages, pageCount}, {reveal = false, rows = 3} = {}) {
  const lines = [`${pageCount} page${pageCount === 1 ? '' : 's'}`];
+ const table = tableColumns(pages);
+ if (table.columns) {
+  const {amount, balance} = table.columns;
+  lines.push(`Table columns: amount x ${Math.round(amount.min)}–${Math.round(amount.max)} · balance x ${Math.round(balance.min)}–${Math.round(balance.max)} (from ${table.dated} dated rows)`);
+  // Numbers outside those two columns are not money in the table.
+  const outside = table.numeric.filter(x => !(x >= amount.min - 14 && x <= amount.max + 14) && !(x >= balance.min - 14 && x <= balance.max + 14));
+  if (outside.length) {
+   const from = Math.round(Math.min(...outside)), to = Math.round(Math.max(...outside));
+   lines.push(`Numbers outside the table: ${outside.length} run${outside.length === 1 ? '' : 's'} at x ${from}${from === to ? '' : `–${to}`} (page labels or headings — skipped)`);
+  }
+ } else lines.push('Table columns: not detected — the checker will read each row on its own.');
  let totalRows = 0, numericRows = 0;
  for (const page of pages) {
   const grouped = rowsOf(page.items);
@@ -135,11 +156,7 @@ export function layoutReport({pages, pageCount}, {reveal = false, rows = 3} = {}
   totalRows += grouped.length;
   numericRows += withNumbers.length;
   lines.push('', `Page ${page.page} · ${page.width}×${page.height} pt · ${page.items.length} text runs · ${grouped.length} rows (${withNumbers.length} with numbers)`);
-  lines.push(`  numeric columns: ${columns.length ? columns.map(column => `x ${column.from}–${column.to} (${column.shapes.join(' | ') || 'shape unknown'})`).join(', ') : 'none'}`);
-  if (columns.length >= 2) {
-   lines.push(`  balance column: x ${columns[columns.length - 1].from}–${columns[columns.length - 1].to} · amount column: x ${columns[columns.length - 2].from}–${columns[columns.length - 2].to}`);
-   if (columns.length > 2) lines.push(`  ${columns.length} numeric columns — a separate credit/debit pair is not supported yet`);
-  }
+  lines.push(`  numeric cells: ${columns.length ? columns.map(column => `x ${column.from}–${column.to} (${column.shapes.join(' | ') || 'shape unknown'})`).join(', ') : 'none'}`);
   const samples = grouped.slice(0, rows * 3).filter(row => row.items.length);
   for (const row of samples.slice(0, rows * 3)) {
    const cells = row.items.map(item => `[x${Math.round(item.x)}] ${maskText(item.text, {reveal})}`).join('  ');
@@ -163,10 +180,13 @@ async function main(argv) {
  const rowIndex = argv.indexOf('--rows');
  const rows = rowIndex >= 0 ? Math.max(1, Number(argv[rowIndex + 1]) || 3) : 3;
  const extracted = await extractPages(path.resolve(file));
+ const table = json ? tableColumns(extracted.pages) : null;
  const report = json
   ? {
    file: path.basename(file),
    pageCount: extracted.pageCount,
+   tableColumns: table.columns,
+   datedRows: table.dated,
    pages: extracted.pages.map(page => ({
     page: page.page, width: page.width, height: page.height,
     rows: rowsOf(page.items).length,

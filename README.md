@@ -103,9 +103,20 @@ Restoring the identifier does not restore the original fingerprint: text edits, 
 - **Running balance.** Each row's balance must equal the previous balance plus its amount (Cr positive, Dr negative). The opening balance is taken from an opening row, or — when the first row carries an amount — from that row's balance minus its amount, using the values before any edit.
 - **Closing total.** The last balance minus the opening balance must equal credits minus debits.
 - **Date order.** A row dated earlier than the row above it is reported as suspicious.
-- **Direction per narration code.** A code such as `UPAR`, `NEFT` or `IMPS` keeps one direction across a statement; a row whose Dr/Cr contradicts the code's usual direction is reported, with the count it contradicts.
+- **Direction per narration code.** A code such as `UPAR`, `NEFT` or `IMPS` keeps one direction across a statement; a row whose Dr/Cr contradicts the code's usual direction is reported, with the count it contradicts. Reversals, refunds, returns and chargebacks are exempt, because coming back the other way is what they are.
 
-Repeated page headers, "Page 3 of 24" lines and column titles are not transactions: rows without a date that repeat on more than one page are counted once.
+The table is read the way the page draws it:
+
+- **Columns are found, not assumed.** The amount and balance columns are the two rightmost runs of numbers shared by the rows that carry a date, so a page footer ("Page 2 of 24"), a CIF or account number, a heading and a column title cannot become a balance. A transaction row whose numbers sit outside the columns is still read on its own geometry.
+- **Ids are not money.** `Y64949982` (transaction id), `UBIN0557048` (IFSC) and `570402010010517` (account number) are rejected as amounts: a currency prefix has to be a symbol or a three-letter code, and a run of more than 13 digits is a reference, not a value.
+- **Both directions are understood.** `1,234.56 Dr`, `1,234.56 CR`, `12.00(Dr)`, `12.00 (Cr)`, `(1,000.00)` and `AED 1,234.56 Cr` all read the same way, and a correction is written back in whichever shape the cell already used.
+- **The narration is the remarks column.** A reference number beside it is dropped, so the code that starts the remarks (`UPIAR/…`, `IMPSAB/…`) is what the direction check compares.
+- **The remarks and the amount must agree.** Banks print the direction twice, once in the remarks (`UPIAR/…/DR/…`) and once after the amount (`300.00(Dr)`). Changing an amount from debit to credit without changing the remarks leaves the row self-contradictory, so it is reported as `narration says /DR/ but the amount 50.00(Cr) is marked CR`. Nothing is rewritten to hide it.
+- **Edited amounts are listed.** Each amount that differs from the document's original is named, with the value it replaced, so it is clear which numbers the balances were rebuilt from.
+
+Repeated page headers, "Page 3 of 24" lines and column titles are not transactions: a page label is skipped even when its digits are the only numbers on the line, and a row without a date that repeats on more than one page is counted once.
+
+An edited amount moves every balance after it, so **Fix balances** can rewrite hundreds of cells on a long statement. Past 25 cells it asks before it starts, and records the whole run as one undo step.
 
 **Fix balances** rewrites only the balance cells that no longer follow from the amounts — the amounts stay as typed — using the same currency prefix, thousands separator, decimal places and Dr/Cr or parenthesis style as the cell it replaces. It records one undo step, refreshes the report, and marks the export as changed. Nothing is uploaded, saved or sent.
 
@@ -119,7 +130,7 @@ node tools/statement-layout.mjs statement.pdf --json    # machine-readable
 node tools/statement-layout.mjs statement.pdf --reveal   # full text, for your own use
 ```
 
-It prints the page size, how many rows were found, the numeric column positions with the shape of the numbers in each (`#,###.## Dr`), whether the balance column is right-aligned, and a few masked sample rows. A password-protected PDF has to be saved as an unencrypted copy first; the editor can open the protected file with its password.
+It prints the page size, how many rows were found, the amount and balance columns the checker would use, which numbers fall outside the table (page labels), the shape of the numbers in each column (`#,###.##(Dr)`), and a few masked sample rows. A password-protected PDF has to be saved as an unencrypted copy first; the editor can open the protected file with its password.
 
 ## Source metadata
 

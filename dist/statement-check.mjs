@@ -15,34 +15,59 @@ const fromCents = value => Math.round(value) / 100;
 // ---------------------------------------------------------------------------
 // Values
 
+/** A currency prefix is a symbol, or a three-letter code — never an id prefix. */
+const CURRENCY_SYMBOL = /^(?:₹|₩|¥|€|£|\$|₺|₽|₦|₱|฿|Rs\.?|R\$|S\$|HK\$|US\$|A\$|C\$)$/;
+const CURRENCY_CODE = /^[A-Z]{3}$/;
+
+function isCurrencyPrefix(prefix) {
+ const value = prefix.replace(/\s+/g, ' ').trim();
+ if (!value) return true;
+ return CURRENCY_SYMBOL.test(value) || CURRENCY_CODE.test(value);
+}
+
 /**
- * Read one amount cell: "1,234.56", "1,234.56 Dr", "(451.00)", "AED 1,234.56 Cr",
- * "₩1,234.56". Returns null for anything that is not a single amount (dates,
- * narration, column headers, page numbers).
+ * Read one amount cell: "1,234.56", "1,234.56 Dr", "12.00(Dr)", "(451.00)",
+ * "AED 1,234.56 Cr", "₩1,234.56". Returns null for anything that is not a single
+ * amount — a date, narration, column header, page number, transaction id
+ * ("Y64949982") or IFSC code ("UBIN0557048").
  */
 export function parseAmount(text) {
  if (typeof text !== 'string') return null;
  let rest = text.replace(/\u00a0/g, ' ').trim();
  if (!rest || rest.length > 48) return null;
- const suffix = /(?:^|[\s)])(dr|cr)\.?$/i.exec(rest);
- const drcr = suffix ? suffix[1].toUpperCase() : null;
- if (suffix) rest = rest.slice(0, suffix.index).trim();
+ // Direction: "12.00(Dr)" and "12.00 (Cr)" put it in brackets, "12.00 Dr" after a
+ // space. Both mean the same thing; the brackets are how some banks print it.
+ let drcr = null, directionInParentheses = false;
+ let match = /\(\s*(dr|cr)\s*\)\s*$/i.exec(rest);
+ if (match) {
+  drcr = match[1].toUpperCase();
+  directionInParentheses = true;
+  rest = rest.slice(0, match.index).trim();
+ } else if ((match = /(?:^|[\s)])(dr|cr)\.?$/i.exec(rest))) {
+  drcr = match[1].toUpperCase();
+  rest = rest.slice(0, match.index).trim();
+ }
+ if (!rest) return null;
  let negative = false;
  if (/^\(.*\)$/.test(rest)) { negative = true; rest = rest.slice(1, -1).trim(); }
  // A currency prefix is the run of non-digits before the first digit.
  const prefix = /^[^\d]*/.exec(rest)[0];
  const currency = prefix.trim();
+ if (!isCurrencyPrefix(currency)) return null;
  rest = rest.slice(prefix.length);
- if (!/^-?\d[\d,\u2009 ]*(?:\.\d{1,3})?$/.test(rest)) return null;
+ if (!/^-?\d[\d, ]*(?:\.\d{1,3})?$/.test(rest)) return null;
+ // An account number or a reference is a long run of digits, not money.
+ const digits = rest.replace(/\D/g, '');
+ if (digits.length > 13) return null;
  const decimals = (rest.split('.')[1] || '').length;
  const thousands = rest.includes(',');
- const body = rest.replace(/[\s\u2009]/g, '');
+ const body = rest.replace(/[\s]/g, '');
  const value = Number(body.replace(/,/g, ''));
  if (!Number.isFinite(value)) return null;
+ const signed = drcr === 'DR' ? -Math.abs(value) : drcr === 'CR' ? Math.abs(value) : (negative ? -Math.abs(value) : value);
  return {
-  value: drcr === 'DR' ? -Math.abs(value) : drcr === 'CR' ? Math.abs(value) : (negative ? -Math.abs(value) : value),
-  cents: toCents(drcr === 'DR' ? -Math.abs(value) : drcr === 'CR' ? Math.abs(value) : (negative ? -Math.abs(value) : value)),
-  drcr, currency, decimals, thousands, parentheses: negative, raw: text.trim(),
+  value: signed, cents: toCents(signed),
+  drcr, directionInParentheses, currency, decimals, thousands, parentheses: negative, raw: text.trim(),
  };
 }
 
@@ -94,9 +119,11 @@ export function formatAmountLike(sample, value) {
  // The direction follows the value; the sample only supplies how it is written.
  if (suffix) {
   // Keep the casing the document used ("Dr" vs "DR").
-  const written = /(?:^|[\s)])(dr|cr)\.?$/i.exec(parsed?.raw || '')?.[1] || suffix;
+  const written = /(?:^|[\s)])(dr|cr)\.?$/i.exec((parsed?.raw || '').replace(/\(\s*(dr|cr)\s*\)\s*$/i, ' $1'))?.[1] || suffix;
   const style = written === written.toUpperCase() ? {dr: 'DR', cr: 'CR'} : {dr: 'Dr', cr: 'Cr'};
-  return `${prefix}${body} ${negative ? style.dr : style.cr}`;
+  const direction = negative ? style.dr : style.cr;
+  // "12.00(Dr)" and "12.00 Dr" are both common; match the cell being replaced.
+  return parsed?.directionInParentheses ? `${prefix}${body}(${direction})` : `${prefix}${body} ${direction}`;
  }
  if (negative && parsed?.parentheses) return `${prefix}(${body})`;
  return `${prefix}${negative ? `-${body}` : body}`;
@@ -119,27 +146,106 @@ export function groupRows(blocks, {tolerance = 2.5} = {}) {
  return rows;
 }
 
+// Numeric columns are found from the rows that carry a date, because headers,
+// page footers ("Page 1 of 24") and account details sit on the same page but are
+// not part of the table. A statement may right-align its money, so a column is
+// searched with a little slack either side of the numbers it was built from.
+const BAND_SLACK = 14;
+const BAND_GAP = 12;
+
+/**
+ * Find the amount and balance columns from the rows of a statement.
+ * A column is a run of numeric cells at (nearly) the same x that most dated rows
+ * share. The rightmost column is the running balance, the one before it the
+ * amount. Returns null when the layout cannot be read that way, and the caller
+ * then falls back to reading each row on its own.
+ */
+export function detectColumns(groups) {
+ const dated = [], samples = [];
+ for (const group of groups) {
+  const hasDate = group.blocks.some(block => parseDate(block.text));
+  if (!hasDate) continue;
+  dated.push(group);
+  for (const block of group.blocks) if (parseAmount(block.text)) samples.push(block.x);
+ }
+ if (dated.length < 2 || samples.length < dated.length) return null;
+ samples.sort((a, b) => a - b);
+ const bands = [];
+ for (const x of samples) {
+  const band = bands[bands.length - 1];
+  if (band && x - band.max <= BAND_GAP) band.max = x;
+  else bands.push({min: x, max: x, count: 0});
+ }
+ for (const band of bands) band.count = samples.filter(x => x >= band.min && x <= band.max).length;
+ // A column has to appear on most rows, or it is a stray number.
+ const useful = bands.filter(band => band.count >= Math.max(2, dated.length * 0.4));
+ if (useful.length < 2) return null;
+ // Join neighbours that are too close to be told apart.
+ const merged = [];
+ for (const band of useful) {
+  const last = merged[merged.length - 1];
+  if (last && band.min - last.max < 8) { last.max = Math.max(last.max, band.max); last.count += band.count; }
+  else merged.push({...band});
+ }
+ if (merged.length < 2) return null;
+ const amount = merged[merged.length - 2], balance = merged[merged.length - 1];
+ return {
+  amount: {min: amount.min, max: amount.max},
+  balance: {min: balance.min, max: balance.max},
+  rows: dated.length,
+ };
+}
+
+/** A reference number rather than words: "Y64949982", "622719504". */
+function isReference(text) {
+ const value = String(text || '').trim();
+ return /^[A-Z]{1,2}\d{5,16}$/.test(value) || /^\d{6,}$/.test(value);
+}
+
+const inBand = (block, band) => !!band && block.x >= band.min - BAND_SLACK && block.x <= band.max + BAND_SLACK;
+
 /** Split one visual row into date, narration, amount and balance cells. */
-export function classifyRow(row) {
+export function classifyRow(row, columns = null) {
  const cells = row.blocks.map(block => ({block, amount: parseAmount(block.text), date: parseDate(block.text)}));
  const dateCell = cells.find(cell => cell.date) || null;
- const amounts = cells.filter(cell => cell.amount);
+ const numeric = cells.filter(cell => cell.amount);
  let balance = null, amount = null;
- if (amounts.length >= 2) {
-  balance = amounts[amounts.length - 1];
-  amount = amounts[amounts.length - 2];
- } else if (amounts.length === 1) {
-  // A single number with a direction suffix is the amount; otherwise it is the
-  // running balance of an opening/closing row.
-  if (amounts[0].amount.drcr) amount = amounts[0];
-  else balance = amounts[0];
+ if (columns) {
+  balance = numeric.find(cell => inBand(cell.block, columns.balance)) || null;
+  amount = numeric.find(cell => inBand(cell.block, columns.amount) && cell !== balance) || null;
+ }
+ // Without a column layout, or on a dated row whose numbers sit outside the
+ // columns found for the table, the row is read on its own. A dated row is a
+ // transaction, so its geometry is trusted over a column it does not line up
+ // with. A row with no date (header, footer, account block) gets no such second
+ // chance: it has to land in the columns to count.
+ if (!columns || (dateCell && (!balance || (!amount && numeric.length >= 2)))) {
+  // The rightmost number is the balance, the one before it the amount. A single
+  // number with a direction suffix is an amount, otherwise a running balance.
+  if (numeric.length >= 2) {
+   balance = numeric[numeric.length - 1];
+   amount = numeric[numeric.length - 2];
+  } else if (numeric.length === 1) {
+   if (numeric[0].amount.drcr) amount = numeric[0];
+   else balance = numeric[0];
+  }
  }
  const used = new Set([dateCell, amount, balance].filter(Boolean));
- const narration = cells.filter(cell => !used.has(cell)).map(cell => cell.block.text).join(' ').trim();
+ // The narration is what is left: the remarks column. A transaction id
+ // ("Y64949982") or an account number next to it is a reference, not prose, and
+ // leaving it in would hide the narration code that starts the remarks.
+ const narration = cells
+  .filter(cell => !used.has(cell))
+  .map(cell => cell.block.text)
+  .filter(text => !isReference(text))
+  .join(' ').trim();
  return {date: dateCell?.date || null, dateBlock: dateCell?.block || null, narration, amount, balance, cells};
 }
 
 const DIRECTION = [/^([A-Za-z]{2,10})\b/];
+// A refund, return or reversal is the one time a code legitimately takes the
+// other direction, so those rows never count as an outlier.
+const REVERSAL = /(?:^|[^A-Za-z])(reversal|reversed|refund|refunded|return|returned|chargeback|rev)(?:[^A-Za-z]|$)/i;
 
 /** The leading code of a narration ("UPAR/payment", "NEFT CR", "IMPS/…"). */
 export function narrationCode(text) {
@@ -159,14 +265,26 @@ export function narrationCode(text) {
 export function extractStatementRows(pages, {tolerance = 2.5} = {}) {
  const rows = [], skipped = [];
  const seenText = new Map();
- for (const page of pages) {
-  const originals = page.originals instanceof Map ? page.originals : new Map();
-  const pageNumber = Number(page.page) || 1;
-  for (const group of groupRows(page.blocks, {tolerance})) {
-   const classified = classifyRow(group);
+ // Group every page first: the column layout is a property of the whole
+ // statement, so it is read from all the dated rows before any row is classified.
+ const layout = pages.map(page => ({
+  page,
+  pageNumber: Number(page.page) || 1,
+  originals: page.originals instanceof Map ? page.originals : new Map(),
+  groups: groupRows(page.blocks, {tolerance}),
+ }));
+ const columns = detectColumns(layout.flatMap(entry => entry.groups));
+ for (const {pageNumber, originals, groups} of layout) {
+  for (const group of groups) {
+   const classified = classifyRow(group, columns);
    const text = group.blocks.map(block => block.text).join(' ').replace(/\s+/g, ' ').trim();
    const header = pageFromHeader(text);
-   if (!classified.balance && !classified.date) continue; // titles, footers, page labels
+   // "Page 1 of 24" is a page label even when its digits are the only numbers on
+   // the line, so it can never become a transaction.
+   if (header && /^page\s+\d+\s+of\s+\d+$/i.test(text)) continue;
+   if (!classified.balance && !classified.date) continue; // titles, headers
+   // With a column layout known, a balance has to sit in the balance column: this
+   // is what keeps account numbers, CIF ids and "Page 2 of 24" out of the chain.
    if (!classified.balance) { skipped.push({page: pageNumber, text, reason: 'no balance'}); continue; }
    // Repeated page headers repeat their narration, not their figures.
    const key = (classified.narration || text).toLowerCase().replace(/\s+/g, ' ').trim();
@@ -210,7 +328,7 @@ export function extractStatementRows(pages, {tolerance = 2.5} = {}) {
  const ordered = rows
   .filter(row => !(row.date === null && !row.amount && (seenText.get((row.narration || row.text).toLowerCase().replace(/\s+/g, ' ').trim())?.size || 0) > 1))
   .sort((a, b) => a.page - b.page || a.y - b.y);
- return {rows: ordered, skipped};
+ return {rows: ordered, skipped, columns};
 }
 
 function pageFromHeader(text) {
@@ -232,7 +350,7 @@ function issue(code, severity, row, message, extra = {}) {
  */
 export function checkStatement(rows, {tolerance = BALANCE_TOLERANCE} = {}) {
  const limit = Math.max(1, Math.round(tolerance * 100));
- const issues = [], checked = [];
+ const issues = [], checked = [], edited = [];
  const transactions = rows.filter(row => row.balance && (row.amount || row.date));
  if (!transactions.length) {
   return {ok: false, empty: true, rowCount: 0, issues: [issue('statement_empty', 'serious', null, 'No statement rows were found on these pages.')], rows: [], fixes: [], totals: null};
@@ -254,7 +372,18 @@ export function checkStatement(rows, {tolerance = BALANCE_TOLERANCE} = {}) {
    running += row.amount.cents;
    if (row.amount.cents > 0) {credits += row.amount.cents; creditRows++;}
    else if (row.amount.cents < 0) {debits += Math.abs(row.amount.cents); debitRows++;}
-   if (row.amount.drcr && row.narration) {
+   // An amount that was typed by hand is the reason the balances below it move,
+   // and it is the one thing a validator comparing against the original sees.
+   if (row.amount.originalCents != null && row.amount.originalCents !== row.amount.cents)
+    edited.push({page: row.page, row: number, from: formatAmountLike(row.amount.text, fromCents(row.amount.originalCents)), to: row.amount.text});
+   // The remarks often repeat the direction ("UPIAR/…/DR/…"). If the amount says
+   // the opposite, one of the two was edited and the other was left behind.
+   const marker = /\/(DR|CR)\//i.exec(row.narration || '');
+   if (marker && row.amount.drcr && marker[1].toUpperCase() !== row.amount.drcr) {
+    entry.checks.push('narration_marker');
+    issues.push(issue('narration_marker', 'serious', {...row, number}, `narration says /${marker[1].toUpperCase()}/ but the amount ${row.amount.text} is marked ${row.amount.drcr}.`));
+   }
+   if (row.amount.drcr && row.narration && !REVERSAL.test(row.narration)) {
     const code = narrationCode(row.narration);
     if (code) {
      const tally = directions.get(code) || {CR: 0, DR: 0};
@@ -290,6 +419,7 @@ export function checkStatement(rows, {tolerance = BALANCE_TOLERANCE} = {}) {
   if (Math.max(tally.CR, tally.DR) / total < 0.7) continue;
   for (const row of transactions) {
    if (!row.amount?.drcr || !row.date) continue;
+   if (REVERSAL.test(row.narration || '')) continue;
    if (narrationCode(row.narration) !== code) continue;
    if (row.amount.drcr === majority) continue;
    const number = transactions.indexOf(row) + 1;
@@ -318,6 +448,7 @@ export function checkStatement(rows, {tolerance = BALANCE_TOLERANCE} = {}) {
   closing: fromCents(closingCents),
   difference: fromCents(difference),
   chainOk: mismatches === 0,
+  editedAmounts: edited,
   rows: checked,
  };
 }
@@ -340,6 +471,11 @@ export function formatReport(report) {
    const where = item.page ? `page ${item.page}${item.row ? `, row ${item.row}` : ''}: ` : '';
    lines.push(`- ${item.severity === 'serious' ? '✗' : '!'} ${where}${item.message}`);
   }
+ }
+ if (report.editedAmounts?.length) {
+  lines.push('', `Edited amounts (${report.editedAmounts.length} row${report.editedAmounts.length === 1 ? '' : 's'}; the balances follow these):`);
+  for (const item of report.editedAmounts.slice(0, 10)) lines.push(`- page ${item.page}, row ${item.row}: ${item.from} → ${item.to}`);
+  if (report.editedAmounts.length > 10) lines.push(`- … ${report.editedAmounts.length - 10} more`);
  }
  if (report.fixes.length) {
   lines.push('', 'Balance fixes (follow the amounts already in the document):');
