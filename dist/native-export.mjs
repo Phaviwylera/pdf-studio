@@ -194,6 +194,22 @@ function applyPatches(source,patches){let text=source;for(const p of [...patches
 function saveTree(node,context,L,counter){let resources=null;const patches=[...node.patches];for(const form of node.forms){const child=saveTree(form.child,context,L,counter);if(!child.changed)continue;if(!resources)resources=cloneResources(node.resources,context,L);const dict=form.object.dict.clone(context);dict.delete(L.PDFName.of('Filter'));dict.delete(L.PDFName.of('DecodeParms'));dict.delete(L.PDFName.of('Length'));dict.set(L.PDFName.of('Resources'),child.resources||form.child.resources);const stream=context.flateStream(bytes(child.source));for(const [key,value] of dict.entries())stream.dict.set(key,value);const ref=context.register(stream),xs=lookup(resources,'XObject',L);const name=freshName(xs,'Fm',counter,L);xs.set(name,ref);patches.push({start:form.operation.start,end:form.operation.end,text:`${name.toString()} Do`})}return {changed:patches.length>0,source:applyPatches(node.source,patches),resources}}
 export function originalMissingChars(map,text){return [...new Set(Array.from(String(text??'').replace(/[\r\n]/g,'')))].filter(char=>!map?.has(char))}
 function originalEncoder(map,text,size){let encoded=[],width=0,count=0;const keys=[...map.keys()].sort((a,b)=>b.length-a.length);for(let i=0;i<text.length;){let match=keys.find(k=>text.startsWith(k,i));if(!match)throw new Error(`The original font cannot encode ${JSON.stringify(text[i])}. Choose an available font or load a TTF/OTF font; no image conversion was performed.`);const item=map.get(match);encoded.push(item.bytes);width+=item.unitWidth*size;count++;i+=match.length}return {hex:hex(concatenate(encoded)),width,count}}
+// A font dictionary this document already has can write the text with a plain
+// string. The producer's own operators use one, so a replacement does too: a
+// tokenised TJ is only needed when word spacing has to be written as an offset.
+export function documentHexEncoder(font){
+ const advance=code=>((font.widths.get(code)??font.defaultWidth)/1000);
+ return (text,size)=>{
+  const chars=Array.from(String(text??'').replace(/[\r\n]/g,''));
+  let hex='',width=0;
+  for(const char of chars){
+   const entry=font.codes.get(char);
+   if(!entry)throw new Error(`This PDF's embedded font has no character mapping for ${JSON.stringify(char)}.`);
+   hex+=entry.code;width+=advance(entry.code)*size;
+  }
+  return {hex,width,count:chars.length};
+ };
+}
 function standardName(block){const family=block.font==='original'?block.fallback:block.font;if(/Times|Georgia/.test(family))return block.bold?(block.italic?'Times-BoldItalic':'Times-Bold'):(block.italic?'Times-Italic':'Times-Roman');const mono=/Courier/.test(family),root=mono?'Courier':'Helvetica';return root+(block.bold?(block.italic?'-BoldOblique':'-Bold'):(block.italic?'-Oblique':''))}
 // The advance of a run as the document's own font defines it. block.scaleX is a
 // browser measurement correction (item.width / canvas width); writing it into the
@@ -328,6 +344,24 @@ export async function exportNativePdf({original,edits,getPage,fonts=new Map(),or
       }
      }
      patched=rewriteInPlace(pairs,block,lookup(resources,'Font',L),data.vp,targets,original,matrixPatches);
+     if(!patched&&block.font==='original'){
+      // A producer embeds only the glyphs that page drew, so the page's own
+      // program may lack a character of the replacement. Another page normally
+      // has the same typeface with that glyph: point at that program, keep the
+      // text object where the producer put it, and only fall back to a separate
+      // block when no program in the document can write the text.
+      const peers=documentFontCandidates(output,context,L,n-1),identity=fontKey(block.fontName||'');
+      const donor=peers.find(entry=>encodesAll(entry.font,block.text)&&(!identity||fontKey(entry.font.baseFont||'')===identity))||peers.find(entry=>encodesAll(entry.font,block.text));
+      if(donor){
+       const fontResources=lookup(resources,'Font',L),name=existingName(fontResources,donor.ref)||freshName(fontResources,'F',counter,L);
+       const added=!fontResources.has(name);
+       fontResources.set(name,donor.ref);
+       targets.push({fontObject:donor.ref,map:donor.font.codes,encoder:(block.wordSpacing||0)===0?documentHexEncoder(donor.font):documentFontEncoder(donor.font,{wordSpacing:block.wordSpacing})});
+       matrixPatches.length=0;
+       patched=rewriteInPlace(pairs,block,lookup(resources,'Font',L),data.vp,targets,original,matrixPatches);
+       if(!patched&&added)fontResources.delete(name);
+      }
+     }
     }
     if(patched){
      for(const patch of matrixPatches)pairs[0].slot.node.patches.push(patch);

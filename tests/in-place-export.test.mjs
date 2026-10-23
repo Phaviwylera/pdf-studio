@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createRequire} from 'node:module';
-import {exportNativePdf} from '../dist/native-export.mjs';
+import {exportNativePdf, documentHexEncoder} from '../dist/native-export.mjs';
 
 const require = createRequire(import.meta.url);
 const L = require('../dist/vendor/pdf-lib.min.js');
@@ -150,4 +150,24 @@ test('a new block is drawn at natural width too', async () => {
   assert.equal(c, 0);
   assert.equal(Math.abs(d), 1);
  }
+});
+
+test('a font the document already has writes the replacement as one plain string', () => {
+ // The page's own program is a subset: it has the glyphs for "NEFT", not for
+ // every character the page happened to draw. The font dictionary's code map is
+ // the whole subset, so the replacement is still a single <hex> Tj.
+ const font = {
+  codes: new Map([['A', {code: '0041'}], ['B', {code: '0042'}], [' ', {code: '0020'}]]),
+  widths: new Map([['0041', 600], ['0042', 700], ['0020', 250]]),
+  defaultWidth: 500,
+ };
+ const encoded = documentHexEncoder(font)('AB A', 10);
+ assert.equal(encoded.hex, '004100420020' + '0041');
+ assert.equal(encoded.count, 4);
+ assert.ok(Math.abs(encoded.width - 21.5) < 1e-9);
+});
+
+test('a character the document font cannot map is named, not dropped', () => {
+ const font = {codes: new Map([['A', {code: '0041'}]]), widths: new Map(), defaultWidth: 500};
+ assert.throws(() => documentHexEncoder(font)('AZ', 10), /no character mapping for "Z"/);
 });
