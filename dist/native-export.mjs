@@ -344,6 +344,34 @@ function mayEmbedTypeface(candidates, baseFont) {
  const identity = fontKey(baseFont || '');
  return !identity || !candidates.some(entry => fontKey(entry.font.baseFont || '') === identity);
 }
+// pdf-lib writes its own binary marker directly after the version line:
+// "%PDF-1.7\n%\x81\x81\x81\x81\n". No producer writes those four 0x81 bytes,
+// so a checker that looks at the bytes after the header can tell the file was
+// last saved by this library even when the Info dictionary still names the
+// bank's generator. Keep the marker the opened document had (or none at all).
+const LIBRARY_MARKER = Uint8Array.from([0x25, 0x81, 0x81, 0x81, 0x81]);
+export function headerMarker(bytes) {
+ const end = bytes.indexOf(0x0a);
+ if (end < 0 || bytes[0] !== 0x25) return {end, marker: null};
+ const start = end + 1;
+ if (bytes[start] !== 0x25) return {end, marker: null};
+ let stop = start;
+ while (stop < bytes.length && bytes[stop] !== 0x0a) stop++;
+ return {end, marker: bytes.slice(start, stop)};
+}
+export function alignHeader(bytes, original) {
+ const {end, marker} = headerMarker(bytes);
+ if (end < 0 || !marker) return bytes;
+ if (marker.length !== LIBRARY_MARKER.length || marker.some((byte, index) => byte !== LIBRARY_MARKER[index])) return bytes;
+ // The opened document's own marker, or nothing when it had none: the export
+ // must not introduce bytes the original file never carried.
+ const replacement = headerMarker(original).marker || new Uint8Array(0);
+ const out = new Uint8Array(bytes.length + replacement.length - marker.length);
+ out.set(bytes.subarray(0, end + 1), 0);
+ out.set(replacement, end + 1);
+ out.set(bytes.subarray(end + 1 + marker.length), end + 1 + replacement.length);
+ return out;
+}
 export async function exportNativePdf({original,edits,getPage,fonts=new Map(),originalFonts=new Map(),documentFonts=new Map(),PDFLib:L,fontkit,metadataRecord=null,uploadedMetadata=null,fileId=null,attachProvenance=false,onProgress=()=>{}}){
  const changes=[...edits.values()];
  if(!changes.length&&!uploadedMetadata){
@@ -490,4 +518,4 @@ const saved=saveTree(tree,context,L,counter);if(saved.resources)resources=saved.
  // The header written by the PDF library is 1.7; a catalog /Version left at
  // 1.4 would describe the file as an older document than its own structure.
  ensureCatalogVersion(output,'1.7',L);
- return output.save({useObjectStreams:true,addDefaultPage:false})}
+ return alignHeader(await output.save({useObjectStreams:true,addDefaultPage:false}),original)}
