@@ -118,8 +118,10 @@ test('native export writes the same fill/stroke, spacing and weight state the pr
  assert.match(content, /2 Tr/);
  assert.match(content, /2 Tc/);
  assert.match(content, /3 Tw/);
- assert.match(content, /0 Ts/);
- assert.match(content, /100 Tz/);
+ // Default text state (rise 0, horizontal scale 100) is inherited rather than
+ // restated, so the export does not carry settings the document never uses.
+ assert.doesNotMatch(content, /\bTs\b/);
+ assert.doesNotMatch(content, /\bTz\b/);
  assert.doesNotMatch(content, /0 Tr/, 'the original fill+stroke mode is not silently flattened to fill');
  const origin = tmOrigin(content);
  assert.equal(origin.y, 200, 'page height 300 minus the 100 pt baseline');

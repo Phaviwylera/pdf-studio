@@ -137,7 +137,8 @@ test('an unchanged-style edit is written into the original operation', async () 
  });
  const pdf = await L.PDFDocument.load(exported, {updateMetadata: false});
  const text = await content(pdf);
- assert.match(text, /\[<68656C6C> -?\d+(?:\.\d+)?\] TJ/, 'the glyphs stay in the original text object');
+ assert.match(text, /<68656C6C> Tj/, 'the glyphs stay in the original text object');
+ assert.doesNotMatch(text, /\]\s*TJ/, 'no width squeeze is written when nothing follows the run');
  assert.doesNotMatch(text, /\bq\nq\n/, 'no extra graphics-state wrapper is added');
  const fonts = pdf.getPage(0).node.Resources().lookup(name('Font'), L.PDFDict);
  assert.equal([...fonts.entries()].length, 1, 'no second font resource is registered');
@@ -155,6 +156,10 @@ test('a style change is still rewritten inside the original text object', async 
  // The new size, colour and position live in the original text object.
  assert.match(text, /\/\S+ 18 Tf/);
  assert.match(text, /0\.6666667 0 0 rg/);
+ // Only operators the document itself uses: no Tz/Ts/Tr/Tc/Tw noise and no
+ // horizontal squeeze in the replacement.
+ assert.doesNotMatch(text, /\b(?:Tz|Ts|Tr|Tc|Tw)\b/, 'no rendering settings the rest of the document never uses');
+ assert.doesNotMatch(text, /\]\s*TJ/, 'no squeezed TJ');
  assert.equal((text.match(/\bBT\b/g) || []).length, 1, 'no second text object is added');
  assert.equal((text.match(/\bq\b/g) || []).length, 1, 'no extra graphics-state wrapper');
  assert.doesNotMatch(text, /\[\s*-?\d+(?:\.\d+)?\s*\]\s*TJ/, 'no spacing-only TJ is left behind');
@@ -271,4 +276,51 @@ test('a character the subset cannot map is refused instead of duplicating the fo
   }),
   /original font cannot encode "~"/,
  );
+});
+
+test('a block split across two font runs is still rewritten in place', async () => {
+ // Two embedded subsets (two font dictionaries) on one line, as a table cell with
+ // a label in one font and its value in another produces.
+ const pdf = await L.PDFDocument.create();
+ pdf.registerFontkit(fontkit);
+ const label = await pdf.embedFont(liberation, {subset: true});
+ const value = await pdf.embedFont(liberation, {subset: true});
+ const page = pdf.addPage([400, 200]);
+ page.drawText('Balance ', {x: 30, y: 150, size: 10, font: label});
+ page.drawText('1,099.88', {x: 78, y: 150, size: 10, font: value});
+ const original = await pdf.save({useObjectStreams: false, addDefaultPage: false});
+
+ const source = await L.PDFDocument.load(original, {updateMetadata: false});
+ const fonts = source.getPage(0).node.Resources().lookup(name('Font'), L.PDFDict);
+ const byName = new Map([...fonts.entries()].map(([key, ref]) => [key.toString(), readDocumentFont(ref, source.context, L)]));
+ const run = (text, index, key) => {
+  const font = byName.get(key);
+  return {
+   index, str: text, fontId: key, font: {fontMatrix: [0.001, 0, 0, 0.001, 0, 0]}, color: '#000000', mode: 0, pattern: false,
+   glyphs: [...text].map(character => {
+    const entry = font.codes.get(character);
+    return {originalCharCode: parseInt(entry.code, 16), unicode: character, width: font.widths.get(entry.code) ?? entry.width, isSpace: character === ' '};
+   }),
+  };
+ };
+ const keys = [...byName.keys()];
+ const pristine = {
+  id: '1:0', page: 1, text: 'Balance 1,099.88', font: 'original', fontId: keys[0],
+  size: 10, x: 30, y: 150, lineheight: 1.2, align: 'left', scaleX: 1, spacing: 0, wordSpacing: 0,
+  color: '#000000', strokeColor: '#000000', strokeWidth: 1, textMode: 0, underline: false,
+  bold: false, italic: false, ops: [0, 1],
+ };
+ const edited = {...pristine, text: 'Balance 1,099.08'};
+ const exported = await exportNativePdf({
+  original, edits: new Map([['1:0', edited]]), PDFLib: L, fontkit,
+  getPage: async () => ({vp: {transform: [1, 0, 0, -1, 0, 200]}, info: {ops: [run('Balance ', 0, keys[0]), run('1,099.88', 1, keys[1])]}, blocks: [pristine]}),
+ });
+ const out = await L.PDFDocument.load(exported, {updateMetadata: false});
+ const text = await content(out);
+ const report = fontReport(out);
+ assert.equal(report.programs, 2, 'no program is added');
+ assert.equal((text.match(/\bBT\b/g) || []).length, 2, 'both runs stay inside the original text objects');
+ assert.equal((text.match(/\bTj\b/g) || []).length, 2, 'the label and the value are both written');
+ assert.doesNotMatch(text, /\]\s*TJ/, 'no width squeeze');
+ assert.doesNotMatch(text, /\b(?:Tz|Ts|Tr|Tc|Tw)\b/, 'no rendering settings the document never uses');
 });
