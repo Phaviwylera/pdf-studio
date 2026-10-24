@@ -95,7 +95,7 @@ function deletable(slot){
 // the fonts that page already names. Only operators whose value differs from
 // what the producer left in effect are emitted, so the replacement keeps the
 // document's own operator vocabulary.
-function drawInPlace(block,segments,viewport,original,matrixOp=null,matrixPatches=null,placement=null,placeable=true,ctm=null,nested=false){
+function drawInPlace(block,segments,viewport,original,matrixOp=null,matrixPatches=null,placement=null,placeable=true,ctm=null,nested=false,columnEdge=null){
  const inv=inverse(viewport.transform),lines=String(block.text??'').split('\n').filter(line=>line.length);
  const scale=formScale(ctm);
  // A run inside a form is written in the form's own coordinates, so a position
@@ -130,13 +130,13 @@ function drawInPlace(block,segments,viewport,original,matrixOp=null,matrixPatche
    // only offers more than one segment for a single line.
    lineSegments=[{...segments[0],text:line}];
   }
-  let cursor=placedStart(block,lineSegments,original,!moved);
+  let cursor=placedStart(block,lineSegments,original,!moved,columnEdge);
   // A run that already has a producer matrix is placed from that matrix, not
   // from the preview's coordinates: same decimals, same row. A moved block has
   // no such matrix to reuse, and a squeezed one must not be inherited: text
   // written through a 0.96 scale matrix reads as a squeezed edit.
   const uniform=!matrixOp||!!matrixOrigin(matrixOp);
-  const exact=index===0&&!moved&&uniform&&scale===1?placement:null;
+  const exact=index===0&&!moved&&uniform&&scale===1&&columnEdge===null?placement:null;
   if(exact)cursor=exact.x;
   for(const segment of lineSegments){
    const encoded=segment.encoder(segment.text,block.size);
@@ -145,7 +145,7 @@ function drawInPlace(block,segments,viewport,original,matrixOp=null,matrixPatche
    // there — a second matrix is what makes an edit stand out.
    const where=!moved&&uniform&&(exact
     ?Math.abs(exact.x-exact.origin.x)<1e-9&&Math.abs(exact.y-exact.origin.y)<1e-9
-    :(index===0&&original&&Math.abs(cursor-Number(original.x))<1e-6&&Math.abs(y-Number(original.y))<1e-6));
+    :(index===0&&original&&Math.abs(cursor-Number(original.xExact??original.x))<1e-6&&Math.abs(y-Number(original.yExact??original.y))<1e-6));
    // The block's size is measured in page units. A replacement given a fresh
    // page-space matrix already cancels the form's own scale, so it states the
    // size as the editor shows it; a kept producer matrix is still inside that
@@ -264,7 +264,7 @@ function runAt(block,viewport,expected,entries){
  }
  return expected;
 }
-function rewriteInPlace(pairs,block,fontResources,viewport,targets,original,matrixPatches=null,L=null,nodeFontResources=null){
+function rewriteInPlace(pairs,block,fontResources,viewport,targets,original,matrixPatches=null,L=null,nodeFontResources=null,columnEdge=null){
  if(block.removed||!String(block.text??'')||block.underline)return null;
  const first=pairs[0];if(!first)return null;
  // All runs of the block have to live in one content stream; their fonts may
@@ -301,7 +301,7 @@ function rewriteInPlace(pairs,block,fontResources,viewport,targets,original,matr
  // The run is kept when its own placement contradicts the block's coordinates.
  const paintMatrix=matrixOp||(first.slot.textObject?.origin?.length===6?{args:first.slot.textObject.origin.map(value=>({value}))}:null);
  if(placementChanged(block,original)&&paintsElsewhere(original||block,paintMatrix,first.slot.node?.ctm,viewport))return false;
- try{const placement=matrixOp?exactPlacement(pairs,block,segments,matrixOp,original):null;const placeable=!!matrixOp||(holder&&holder.shows.length===1);return drawInPlace(block,segments,viewport,{...original,fontResourceName:originalFontName?originalFontName.toString():null},matrixOp,matrixPatches,placement,placeable,first.slot.node?.ctm,!!first.slot.node?.nested)}catch{return null}
+ try{const placement=matrixOp?exactPlacement(pairs,block,segments,matrixOp,original):null;const placeable=!!matrixOp||(holder&&holder.shows.length===1);return drawInPlace(block,segments,viewport,{...original,fontResourceName:originalFontName?originalFontName.toString():null},matrixOp,matrixPatches,placement,placeable,first.slot.node?.ctm,!!first.slot.node?.nested,columnEdge)}catch{return null}
 }
 function buildTree(source,resources,state,context,L,slots,ancestors=[],depth=0){if(depth>30)throw new Error('PDF form nesting is too deep.');const ctmStart=state.ctm||[1,0,0,1,0,0];const node={source,resources,patches:[],forms:[],ctm:ctmStart};let current={...state},saves=[],textObject=null,ctm=ctmStart;node.operations=parseContent(source);for(const operation of node.operations){const a=operation.args;if(operation.op==='BT'){textObject={matrix:null,shows:[],moved:false,origin:[1,0,0,1,0,0]}}
 if(operation.op==='q')saves.push({...current,ctm});else if(operation.op==='Q'){const savedState=saves.pop();if(savedState){current=savedState;if(savedState.ctm)ctm=savedState.ctm}}else if(operation.op==='cm'){ctm=compose(ctm,a.slice(0,6).map(value=>Number(value?.value??value)))}else if(operation.op==='Tf'){const fonts=lookup(resources,'Font',L),key=a[0]?.value;const fontObject=fonts?.get(L.PDFName.of(key||''));current={...current,fontObject,fontDict:fontObject?context.lookup(fontObject,L.PDFDict):null,size:a[1]?.value}}else if(operation.op==='Tc')current.spacing=a[0]?.value;else if(operation.op==='Tw')current.word=a[0]?.value;else if(operation.op==='gs'){const ext=lookup(resources,'ExtGState',L),g=ext?.lookupMaybe(L.PDFName.of(a[0]?.value||''),L.PDFDict),font=g?.lookupMaybe(L.PDFName.of('Font'),L.PDFArray);if(font)current={...current,fontObject:font.get(0),fontDict:context.lookup(font.get(0),L.PDFDict),size:font.lookup(1,L.PDFNumber).asNumber()}}else if(['Tj','TJ',"'",'"'].includes(operation.op)){if(operation.op==='"'){current.word=a[0]?.value;current.spacing=a[1]?.value}if(!current.fontObject)throw new Error('PDF text has no resolvable font resource.');if(textObject){textObject.shows.push(operation);if(operation.op==="'"||operation.op==='"')textObject.moved=true}slots.push({node,operation,state:{...current},fontObject:current.fontObject,fontDict:current.fontDict,textObject,matrixAt:textObject&&!textObject.moved?textObject.matrix:null})}else if(operation.op==='Tm'){if(textObject){textObject.matrix=operation;textObject.origin=a.slice(0,6).map(value=>Number(value?.value??value))}}else if(operation.op==='Td'||operation.op==='TD'||operation.op==='T*'){if(textObject){textObject.moved=true;if(operation.op==='T*')textObject.origin=null;else{const tx=Number(a[0]?.value??a[0]),ty=Number(a[1]?.value??a[1]);textObject.origin=textObject.origin&&Number.isFinite(tx)&&Number.isFinite(ty)?translateOrigin(textObject.origin,tx,ty):null}}}else if(operation.op==='Do'){const xobjects=lookup(resources,'XObject',L),key=L.PDFName.of(a[0]?.value||''),ref=xobjects?.get(key),object=ref?context.lookup(ref):null;if(object instanceof L.PDFStream&&object.dict.get(L.PDFName.of('Subtype'))?.toString()==='/Form'){if(ancestors.includes(object))throw new Error('Recursive PDF form cannot be safely edited.');const childResources=lookup(object.dict,'Resources',L)||resources;const matrixEntry=object.dict.get(L.PDFName.of('Matrix'));const formCtm=compose(ctm,matrixEntry instanceof L.PDFArray?matrixEntry.asArray().map(value=>Number(value?.value??value)):[1,0,0,1,0,0]);const child=buildTree(ascii(getDecoded(object,L)),childResources,{...current,ctm:formCtm},context,L,slots,[...ancestors,object],depth+1);child.nested=true;node.forms.push({operation,object,child})}}}return node}
@@ -336,7 +336,60 @@ export function alignedStart(encoder,line,b){if(b.align==='right')return b.x-tex
 // when it is rewritten, so the money column still lines up. Prose keeps its left
 // edge. Neither is stretched.
 function valueInColumn(text){return !!parseAmount(String(text??''))}
-function placedStart(block,segments,original,column=true){
+// The editor rounds every measurement it shows to 0.001 pt, so a block it read
+// from the page carries 403.237 where the producer wrote 403.23749. When the user
+// did not move that block, the producer's own numbers are still the ones to write:
+// a row that comes back rounded is the trace of another program typing into the
+// page. The exact value is only used while it still describes what is displayed.
+function exactNumber(display,exact){
+ const value=Number(exact);
+ if(!Number.isFinite(value))return display;
+ return Math.abs(value-Number(display))<=5e-4?value:display;
+}
+function exactBlock(block,original){
+ if(!original)return block;
+ const precise={...block};
+ for(const [key,exactKey] of [['x','xExact'],['y','yExact'],['size','sizeExact'],['width','widthExact'],['spacing','spacingExact'],['wordSpacing','wordSpacingExact'],['strokeWidth','strokeWidthExact']]){
+  if(original[exactKey]===undefined)continue;
+  precise[key]=exactNumber(block[key],original[exactKey]);
+ }
+ return precise;
+}
+// A statement right-aligns its money: several values end on the same x, and those
+// shared edges are the columns the page itself declares. The cluster is taken from
+// the page as it was opened, so a value the user retyped cannot redefine a column.
+// Each column remembers which rows it covers: a value is only put back into a column
+// that its own part of the table uses, never one from another block of figures.
+function columnEdges(blocks){
+ const rights=(blocks||[]).filter(block=>valueInColumn(block.text)&&Number(block.width)>0)
+  .map(block=>({right:Number(block.x)+Number(block.width),y:Number(block.y)}))
+  .filter(entry=>Number.isFinite(entry.right)&&Number.isFinite(entry.y)).sort((a,b)=>a.right-b.right);
+ const groups=[];
+ for(const entry of rights){
+  const last=groups[groups.length-1];
+  if(last&&Math.abs(entry.right-last.sum/last.count)<=1){last.sum+=entry.right;last.count++;last.rows.push(entry.y)}
+  else groups.push({sum:entry.right,count:1,rows:[entry.y]});
+ }
+ return groups.filter(group=>group.count>=3)
+  .map(group=>({edge:group.sum/group.count,rows:group.rows}))
+  .sort((a,b)=>a.edge-b.edge);
+}
+// A value that already ends on its column is left alone. One that sits off every
+// column keeps the column edge its neighbours share, so a shorter replacement does
+// not drift left of the line the rest of the page ends on.
+function columnEdgeFor(block,original,edges){
+ if(!edges?.length||!original||placementChanged(block,original))return null;
+ if(!valueInColumn(original.text)||!valueInColumn(block.text))return null;
+ const right=Number(original.x)+Number(original.width);
+ if(!Number.isFinite(right))return null;
+ const near=edges.filter(column=>column.rows.some(y=>Math.abs(y-Number(block.y))<=60));
+ if(!near.length)return null;
+ let nearest=null;
+ for(const column of near)if(nearest===null||Math.abs(column.edge-right)<Math.abs(nearest-right))nearest=column.edge;
+ if(nearest===null||Math.abs(nearest-right)<=1||Math.abs(nearest-right)>45)return null;
+ return nearest;
+}
+function placedStart(block,segments,original,column=true,columnEdge=null){
  const width=segments.reduce((total,segment)=>total+textMetrics(segment.encoder,segment.text,block).width,0);
  if(block.align==='decimal')return block.x-width;
  if(block.align==='right')return block.x-width;
@@ -345,6 +398,7 @@ function placedStart(block,segments,original,column=true){
  // place. A block the user moved is drawn where they moved it: block.x is the
  // left edge the preview shows. Applying the column rule there would snap the
  // text back into the old column and ignore the move.
+ if(column&&columnEdge!==null&&columnEdge!==undefined&&Number.isFinite(Number(columnEdge)))return Number(columnEdge)-width;
  if(column&&original&&Number(original.width)>0&&valueInColumn(original.text)&&valueInColumn(block.text))return original.x+Number(original.width)-width;
  return block.x;
 }
@@ -363,7 +417,7 @@ function inverse(m){const [a,b,c,d,e,f]=m,det=a*d-b*c;if(!det)throw new Error('I
 function formScale(ctm){if(!ctm)return 1;const [a,b,c,d]=ctm;if(b||c)return 1;const scale=Math.sqrt(Math.abs(a*d));return Number.isFinite(scale)&&scale>0?scale:1}
 function compose(m,n){return [m[0]*n[0]+m[2]*n[1],m[1]*n[0]+m[3]*n[1],m[0]*n[2]+m[2]*n[3],m[1]*n[2]+m[3]*n[3],m[0]*n[4]+m[2]*n[5]+m[4],m[1]*n[4]+m[3]*n[5]+m[5]]}
 function rgb(color){if(!/^#[\da-f]{6}$/i.test(color))throw new Error('Invalid text color.');return [1,3,5].map(i=>parseInt(color.slice(i,i+2),16)/255)}
-function drawNative(block,encoder,fontName,viewport,original=null){const text=String(block.text??'');if(block.removed||!text)return '';const anchor=original&&!placementChanged(block,original)?original:null;const color=rgb(block.color).map(number).join(' '),strokeHex=/^#[0-9a-f]{6}$/i.test(block.strokeColor||'')?block.strokeColor:block.color,strokeColor=rgb(strokeHex).map(number).join(' '),mode=[0,1,2].includes(Number(block.textMode))?Number(block.textMode):0,spacing=number(block.spacing||0),wordSpacing=number(block.wordSpacing||0),strokeWidth=number(block.strokeWidth??1),inv=inverse(viewport.transform);let content='';for(const [index,line] of text.split('\n').entries()){if(!line)continue;const x=placedStart(block,[{encoder,text:line}],anchor),y=block.y+index*block.size*block.lineheight,matrix=compose(inv,[1,0,0,-1,x,y]);const encoded=encoder(line,block.size);
+function drawNative(block,encoder,fontName,viewport,original=null,columnEdge=null){const text=String(block.text??'');if(block.removed||!text)return '';const anchor=original&&!placementChanged(block,original)?original:null;const color=rgb(block.color).map(number).join(' '),strokeHex=/^#[0-9a-f]{6}$/i.test(block.strokeColor||'')?block.strokeColor:block.color,strokeColor=rgb(strokeHex).map(number).join(' '),mode=[0,1,2].includes(Number(block.textMode))?Number(block.textMode):0,spacing=number(block.spacing||0),wordSpacing=number(block.wordSpacing||0),strokeWidth=number(block.strokeWidth??1),inv=inverse(viewport.transform);let content='';for(const [index,line] of text.split('\n').entries()){if(!line)continue;const x=placedStart(block,[{encoder,text:line}],anchor,true,columnEdge),y=block.y+index*block.size*block.lineheight,matrix=compose(inv,[1,0,0,-1,x,y]);const encoded=encoder(line,block.size);
  // Only the operators this block actually needs: default text state is left to
  // the viewer instead of being restated on every line.
  const state=`${fontName} ${number(block.size)} Tf\n${mode?`${mode} Tr\n`:''}${Number(spacing)?`${spacing} Tc\n`:''}${Number(wordSpacing)?`${wordSpacing} Tw\n`:''}${mode?`${strokeColor} RG\n${strokeWidth} w\n`:''}`;
@@ -448,7 +502,9 @@ export async function exportNativePdf({original,edits,getPage,fonts=new Map(),or
   try{const untouched=await L.PDFDocument.load(original.slice(),{updateMetadata:false});if(sameFileId(fileId,fileIdFromDocument(untouched,L)))return original.slice();applyFileId(untouched,fileId,L);return alignHeader(await untouched.save({useObjectStreams:true,addDefaultPage:false}),headerDonor)}
   catch{return original.slice()}
  }
- let output;try{output=await L.PDFDocument.load(original.slice(),{updateMetadata:false})}catch(error){throw new Error('This PDF cannot be safely rewritten as native content. Open an unlocked PDF first. No image conversion was performed.')}if(signatureProtectionForDocument(output,L).locked)throw new Error('Signature protection is mandatory. This PDF contains a digital signature and cannot be edited. Export the original unchanged or have the issuer sign a new document.');const savedMetadata=capturePdfMetadata(output,L);if(fontkit)output.registerFontkit(fontkit);const context=output.context,fontCache=new Map(),counter={value:0},pages=[...new Set(changes.map(b=>b.page))];for(const n of pages){onProgress(`Exporting native text on page ${n}…`);const page=output.getPage(n-1),data=await getPage(n),pageChanges=changes.filter(b=>b.page===n);let resources=cloneResources(page.node.Resources(),context,L);const slots=[],needsRemoval=pageChanges.some(b=>b.ops?.length),source=collectContent(page.node.get(L.PDFName.of('Contents')),context,L),tree=needsRemoval?buildTree(source,resources,{size:0,spacing:0,word:0,fontObject:null,fontDict:null},context,L,slots):{source,resources,patches:[],forms:[]};const ops=data.info.ops;if(needsRemoval&&slots.length!==ops.length)throw new Error(`Page ${n} has a text structure that cannot be mapped safely. No image conversion was performed.`);const byIndex=new Map(),fontMaps=new Map(),inPlace=new Set();const matrixPatches=[];if(needsRemoval){for(let i=0;i<slots.length;i++){const slot=slots[i],info=ops[i];const pair=decodeGlyphs(slot,info,L),map=fontMaps.get(slot.fontDict)||new Map();fontMaps.set(slot.fontDict,map);pair.glyphs.forEach((glyph,j)=>{if(glyph.unicode&&!map.has(glyph.unicode))map.set(glyph.unicode,{bytes:pair.decoded[j],unitWidth:glyph.width*(info.font.fontMatrix?.[0]??.001)})});byIndex.set(info.index,{slot,info,map})}for(const block of pageChanges){
+ let output;try{output=await L.PDFDocument.load(original.slice(),{updateMetadata:false})}catch(error){throw new Error('This PDF cannot be safely rewritten as native content. Open an unlocked PDF first. No image conversion was performed.')}if(signatureProtectionForDocument(output,L).locked)throw new Error('Signature protection is mandatory. This PDF contains a digital signature and cannot be edited. Export the original unchanged or have the issuer sign a new document.');const savedMetadata=capturePdfMetadata(output,L);if(fontkit)output.registerFontkit(fontkit);const context=output.context,fontCache=new Map(),counter={value:0},pages=[...new Set(changes.map(b=>b.page))];for(const n of pages){onProgress(`Exporting native text on page ${n}…`);const page=output.getPage(n-1),data=await getPage(n),pageChanges=changes.filter(b=>b.page===n);let resources=cloneResources(page.node.Resources(),context,L);const slots=[],needsRemoval=pageChanges.some(b=>b.ops?.length),source=collectContent(page.node.get(L.PDFName.of('Contents')),context,L),tree=needsRemoval?buildTree(source,resources,{size:0,spacing:0,word:0,fontObject:null,fontDict:null},context,L,slots):{source,resources,patches:[],forms:[]};const ops=data.info.ops;
+  // The money columns this page declares, measured before any edit touches it.
+  const edges=columnEdges(data.blocks);if(needsRemoval&&slots.length!==ops.length)throw new Error(`Page ${n} has a text structure that cannot be mapped safely. No image conversion was performed.`);const byIndex=new Map(),fontMaps=new Map(),inPlace=new Set();const matrixPatches=[];if(needsRemoval){for(let i=0;i<slots.length;i++){const slot=slots[i],info=ops[i];const pair=decodeGlyphs(slot,info,L),map=fontMaps.get(slot.fontDict)||new Map();fontMaps.set(slot.fontDict,map);pair.glyphs.forEach((glyph,j)=>{if(glyph.unicode&&!map.has(glyph.unicode))map.set(glyph.unicode,{bytes:pair.decoded[j],unitWidth:glyph.width*(info.font.fontMatrix?.[0]??.001)})});byIndex.set(info.index,{slot,info,map})}for(const block of pageChanges){
    const originalEntry=(data.blocks||[]).find(entry=>entry.id===block.id);
    let pairs=(block.ops||[]).map(index=>byIndex.get(index));
    if(!pairs.length||pairs.some(pair=>!pair))throw new Error('The selected text operation cannot be safely removed.');
@@ -457,6 +513,9 @@ export async function exportNativePdf({original,edits,getPage,fonts=new Map(),or
     if(resolved)pairs=[resolved];
    }
    const original=originalEntry;
+   // The producer's own numbers and the column this page uses for money: both are
+   // taken from the untouched page, so an edit cannot watermark itself.
+   const precise=exactBlock(block,original),columnEdge=columnEdgeFor(block,original,edges);
    const shown=String(block.text??'');
    if(!block.removed&&shown){
     matrixPatches.length=0;
@@ -467,7 +526,8 @@ export async function exportNativePdf({original,edits,getPage,fonts=new Map(),or
     // uniform matrix instead — the width the preview showed.
     const uniformMatrix=!pairs[0].slot.matrixAt||!!matrixOrigin(pairs[0].slot.matrixAt);
     let patched;
-    if(sameStyle&&uniformMatrix)patched=patchInPlace(pairs,block.text,text=>originalEncoder(pairs[0].map,text,pairs[0].slot.state.size),L);
+    // A value that sits off its column is re-placed, not patched where it stands.
+    if(sameStyle&&uniformMatrix&&columnEdge===null)patched=patchInPlace(pairs,block.text,text=>originalEncoder(pairs[0].map,text,pairs[0].slot.state.size),L);
     if(!patched){
      // A style change still replaces the run where it is, using a font the page
      // already has (its own font or the reused document font). Only when no such
@@ -489,7 +549,7 @@ export async function exportNativePdf({original,edits,getPage,fonts=new Map(),or
        targets.push({fontObject:ref,map:donor.codes,encoder:documentFontEncoder(donor,{wordSpacing:block.wordSpacing||0})});
       }
      }
-     patched=rewriteInPlace(pairs,block,lookup(resources,'Font',L),data.vp,targets,original,matrixPatches,L,lookup(pairs[0]?.slot.node?.resources,'Font',L));
+     patched=rewriteInPlace(pairs,precise,lookup(resources,'Font',L),data.vp,targets,original,matrixPatches,L,lookup(pairs[0]?.slot.node?.resources,'Font',L),columnEdge);
      if(patched===false)continue;
      if(!patched&&block.font==='original'){
       // A producer embeds only the glyphs that page drew, so the page's own
@@ -505,7 +565,7 @@ export async function exportNativePdf({original,edits,getPage,fonts=new Map(),or
        fontResources.set(name,donor.ref);
        targets.push({fontObject:donor.ref,map:donor.font.codes,encoder:(block.wordSpacing||0)===0?documentHexEncoder(donor.font):documentFontEncoder(donor.font,{wordSpacing:block.wordSpacing})});
        matrixPatches.length=0;
-       patched=rewriteInPlace(pairs,block,lookup(resources,'Font',L),data.vp,targets,original,matrixPatches,L,lookup(pairs[0]?.slot.node?.resources,'Font',L));
+       patched=rewriteInPlace(pairs,precise,lookup(resources,'Font',L),data.vp,targets,original,matrixPatches,L,lookup(pairs[0]?.slot.node?.resources,'Font',L),columnEdge);
        if(!patched&&added)fontResources.delete(name);
        if(patched===false)continue;
       }
@@ -524,7 +584,7 @@ export async function exportNativePdf({original,edits,getPage,fonts=new Map(),or
     pair.slot.node.patches.push({start:pair.slot.operation.start,end:pair.slot.operation.end,text});
    }
   }}
-const saved=saveTree(tree,context,L,counter);if(saved.resources)resources=saved.resources;const fontResources=lookup(resources,'Font',L);let drawing='';for(const block of pageChanges){const original=(data.blocks||[]).find(entry=>entry.id===block.id);if(block.removed||!String(block.text??'')||inPlace.has(block.id))continue;let encoder,fontObject;if(block.font==='original'&&block.ops?.length){
+const saved=saveTree(tree,context,L,counter);if(saved.resources)resources=saved.resources;const fontResources=lookup(resources,'Font',L);let drawing='';for(const block of pageChanges){const original=(data.blocks||[]).find(entry=>entry.id===block.id);if(block.removed||!String(block.text??'')||inPlace.has(block.id))continue;const precise=exactBlock(block,original),columnEdge=columnEdgeFor(block,original,edges);let encoder,fontObject;if(block.font==='original'&&block.ops?.length){
  const pair=byIndex.get(block.ops[0]),missing=originalMissingChars(pair.map,block.text);
  if(!missing.length){
   fontObject=pair.slot.fontObject;
@@ -585,7 +645,7 @@ const saved=saveTree(tree,context,L,counter);if(saved.resources)resources=saved.
  }}const reused=existingName(fontResources,fontObject);
  const name=reused||freshName(fontResources,'F',counter,L);
  if(!reused)fontResources.set(name,fontObject);
- drawing+=drawNative(block,encoder,name.toString(),data.vp,original)}if(drawing||saved.resources)page.node.set(L.PDFName.of('Resources'),resources);
+ drawing+=drawNative(precise,encoder,name.toString(),data.vp,original,columnEdge)}if(drawing||saved.resources)page.node.set(L.PDFName.of('Resources'),resources);
   const contents=saved.changed?saved.source:tree.source;
   // With no new drawing there is no need for a graphics-state wrapper; writing
   // the patched stream as-is keeps the page looking untouched.
