@@ -59,9 +59,9 @@ function pageData(fixture, blocks) {
  });
 }
 
-async function exported(original, fixture, edit) {
+async function exported(original, fixture, edit, blocks = [block(fixture)]) {
  const bytes = await exportNativePdf({
-  original, edits: new Map([[edit.id, edit]]), getPage: pageData(fixture, [block(fixture)]), PDFLib: L,
+  original, edits: new Map([[edit.id, edit]]), getPage: pageData(fixture, blocks), PDFLib: L,
  });
  const pdf = await L.PDFDocument.load(bytes.slice(), {updateMetadata: false});
  const stream = pdf.context.lookup(pdf.getPage(0).node.get(name('Contents')));
@@ -391,4 +391,70 @@ test('a block moved out of its form is drawn on the page, so the form cannot cli
  assert.deepEqual([a, d], [1, 1], 'the run keeps the page\'s own units: no form matrix leaks out');
  assert.ok(Math.abs(e - moved.x) < 0.01, `x ${e} vs ${moved.x}`);
  assert.ok(Math.abs(f - (842 - moved.y)) < 0.01, `baseline ${f} vs ${842 - moved.y}`);
+});
+
+test('a value drawn beside its old run keeps the producer baseline to the last decimal', async () => {
+ // The producer wrote 61.26251, which the preview only ever holds as 138.737 in its
+ // own top-down coordinates. A replacement drawn as its own run from the rounded
+ // number puts 61.262 back on the same row, which is the trace of another program
+ // typing into the page.
+ const original = await statementPage('100.00(Dr)', {x: 447.63751, y: 61.26251});
+ const fixture = {...original, text: '100.00(Dr)'};
+ const placement = {y: Math.round(viewY(fixture.y) * 1000) / 1000, yExact: viewY(fixture.y)};
+ const edit = block(fixture, {text: '1000.00(Cr)', font: 'Helvetica', ...placement});
+
+ const {text} = await exported(original.bytes, fixture, edit, [block(fixture, placement)]);
+ const row = matrices(text).filter(([, , , , , y]) => Math.abs(y - 61.26251) < 0.05);
+ assert.ok(row.length >= 2, 'the replacement is on the row it belongs to');
+ for (const [, , , , , y] of row) assert.ok(Math.abs(y - 61.26251) < 1e-9, `the row keeps its baseline, not ${y}`);
+});
+
+test('a value that sits off its column ends on the column the page uses', async () => {
+ const pdf = await L.PDFDocument.create();
+ const font = await pdf.embedFont(L.StandardFonts.Helvetica);
+ const page = pdf.addPage([300, 200]);
+ const width = value => font.widthOfTextAtSize(value, 9);
+ const column = 60 + width('2000.00(Dr)');
+ // The producer writes five decimals on this row; the editor only holds three.
+ const rowY = 40.23751;
+ // Two cells hold the same value: one ends on the column, one sits 23 pt left of it.
+ const cellsText = [
+  ['2000.00(Dr)', 60], ['300.00(Dr)', column - width('300.00(Dr)')],
+  ['120.00(Dr)', column - width('120.00(Dr)')],
+  ['500.00(Cr)', 40], ['500.00(Cr)', column - width('500.00(Cr)')],
+ ];
+ for (const [value, x] of cellsText) page.drawText(value, {x, y: rowY, size: 9, font});
+ page.drawText(ALPHABET, {x: 20, y: 150, size: 9, font});
+ const bytes = await pdf.save();
+ const placement = {y: Math.round(viewY(rowY) * 1000) / 1000, yExact: viewY(rowY)};
+ // The page's own glyph advances, so the exporter measures what the page shows.
+ const metricOp = (index, text) => ({...op(index, text),
+  glyphs: [...text].map(char => ({originalCharCode: char.codePointAt(0), unicode: char,
+   width: font.widthOfTextAtSize(char, 9) / 9 * 1000, isSpace: char === ' '}))});
+ const cells = cellsText.map(([text, x], index) => block(
+  {text, x, y: rowY, size: 9, width: width(text)},
+  {id: `1:${index}`, ops: [index], xExact: x, widthExact: width(text), ...placement},
+ ));
+ // Both cells are retyped to the same value. The one that was already aligned is
+ // the reference: the one that had drifted has to land on the same x.
+ const replace = async index => {
+  const out = await exportNativePdf({
+   original: bytes, edits: new Map([[cells[index].id, {...cells[index], text: '50000.00(Cr)'}]]),
+   getPage: async () => ({vp: {transform: [1, 0, 0, -1, 0, 200]},
+    info: {ops: [...cellsText.map(([text], i) => metricOp(i, text)), metricOp(cellsText.length, ALPHABET)]},
+    blocks: cells}), PDFLib: L,
+  });
+  const pdfOut = await L.PDFDocument.load(out.slice(), {updateMetadata: false});
+  const text = latin1(L.decodePDFRawStream(pdfOut.context.lookup(pdfOut.getPage(0).node.get(name('Contents')))).decode());
+  const row = matrices(text).filter(matrix => Math.abs(matrix[5] - rowY) < 0.01);
+  const drawn = row.map(matrix => matrix[4]).filter(x => !cellsText.some(([, own]) => Math.abs(own - x) < 1e-6));
+  return {drawn, row};
+ };
+ const drifted = await replace(3);
+ const aligned = await replace(4);
+ assert.equal(drifted.drawn.length, 1, 'the retyped value is drawn once');
+ assert.equal(aligned.drawn.length, 1, 'the aligned value is drawn once');
+ assert.ok(Math.abs(drifted.drawn[0] - aligned.drawn[0]) < 1e-6,
+  `the value ends on its column: ${drifted.drawn[0]} vs ${aligned.drawn[0]}`);
+ for (const matrix of drifted.row) assert.ok(Math.abs(matrix[5] - rowY) < 1e-9, `the row keeps its own baseline, not ${matrix[5]}`);
 });
