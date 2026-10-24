@@ -263,3 +263,132 @@ test('a protected upload keeps the uploaded file\'s marker, not the decryptor\'s
  const xref = Number(/startxref\s+(\d+)/.exec(text)[1]);
  assert.match(text.slice(xref, xref + 20), /^(xref|\d+ 0 obj)/, 'the cross-reference still points at the objects');
 });
+
+// A page whose cells are painted by a form XObject: the producer writes its text
+// in the form's own units, and the page scales that form down. This is the shape
+// a bank statement export has, and the shape an edit has to survive.
+const FORM_CTM = [0.5, 0, 0, 0.5, 100, 200];
+const FORM_ORIGIN = [40, 50];
+const FORM_TEXT = 'Cell 1';
+const formPageX = FORM_CTM[0] * FORM_ORIGIN[0] + FORM_CTM[4];
+const formPageY = FORM_CTM[3] * FORM_ORIGIN[1] + FORM_CTM[5];
+
+async function formPage() {
+ const pdf = await L.PDFDocument.create();
+ const font = await pdf.embedFont(L.StandardFonts.Helvetica);
+ const page = pdf.addPage([595, 842]);
+ const hex = font.encodeText(FORM_TEXT).asString();
+ const form = pdf.context.flateStream(
+  `BT /F1 20 Tf 1 0 0 1 ${FORM_ORIGIN[0]} ${FORM_ORIGIN[1]} Tm <${hex}> Tj ET`,
+  {Type: 'XObject', Subtype: 'Form', BBox: [0, 0, 400, 400], Resources: {Font: {F1: font.ref}}},
+ );
+ const formRef = pdf.context.register(form);
+ const resources = pdf.context.obj({Font: {F1: font.ref}, XObject: {Fm1: formRef}});
+ page.node.set(name('Resources'), resources);
+ page.node.set(name('Contents'), pdf.context.register(
+  pdf.context.flateStream(`q ${FORM_CTM.join(' ')} cm /Fm1 Do Q`),
+ ));
+ return {bytes: await pdf.save(), font};
+}
+
+function formBlock(font, overrides = {}) {
+ return {
+  id: '1:0', page: 1, text: FORM_TEXT, x: formPageX, y: 842 - formPageY, size: 20 * 0.5,
+  width: font.widthOfTextAtSize(FORM_TEXT, 20) * 0.5, height: 10, fontName: 'Helvetica',
+  fontId: 'g_d0_f1', font: 'original', bold: false, italic: false, underline: false,
+  spacing: 0, wordSpacing: 0, lineheight: 1.2, align: 'left', scaleX: 1, textMode: 0,
+  strokeWidth: 1, color: '#000000', strokeColor: '#000000', ops: [0], canEdit: true, ...overrides,
+ };
+}
+
+function formOps(font) {
+ const glyphs = [...FORM_TEXT].map(char => ({
+  originalCharCode: char.charCodeAt(0), unicode: char,
+  width: (font.widthOfTextAtSize(char, 20) / 20) * 1000, isSpace: char === ' ',
+ }));
+ return {index: 0, str: FORM_TEXT, fontId: 'g_d0_f1', font: {fontMatrix: [0.001, 0, 0, 0.001, 0, 0]},
+  fontSize: 20, color: '#000000', strokeColor: '#000000', mode: 0, lineWidth: 1, charSpacing: 0,
+  wordSpacing: 0, textRise: 0, hScale: 100, pattern: false, strokePattern: false, glyphs};
+}
+
+function formData(font, blocks) {
+ return async () => ({
+  vp: {transform: [1, 0, 0, -1, 0, 842]},
+  info: {ops: [formOps(font)]},
+  blocks,
+ });
+}
+
+// The page position a Tm inside the form puts its text at, and the size it is
+// actually shown at, both measured the way a viewer reads the page.
+function paintedInForm(content, formMatrix = [1, 0, 0, 1, 0, 0]) {
+ const match = /([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) Tm/.exec(content);
+ assert.ok(match, 'the replacement states where it goes');
+ const [a, b, c, d, e, f] = match.slice(1, 7).map(Number);
+ const x = FORM_CTM[0] * (formMatrix[0] * e + formMatrix[2] * f + formMatrix[4]) + FORM_CTM[4];
+ const y = FORM_CTM[3] * (formMatrix[1] * e + formMatrix[3] * f + formMatrix[5]) + FORM_CTM[5];
+ const size = Number(/([-\d.]+) Tf/.exec(content)?.[1] ?? NaN) * FORM_CTM[0] * a;
+ return {x, y, size};
+}
+
+test('a moved block is written at the coordinates the user set', async () => {
+ const original = await statementPage('100.00(Dr)');
+ const fixture = {...original, text: '100.00(Dr)'};
+ const moved = block(fixture, {x: fixture.x + 40, y: viewY(fixture.y) - 15});
+ const {text} = await exported(original.bytes, fixture, moved);
+ const cell = matrices(text).find(matrix => Math.abs(matrix[5] - (fixture.y + 15)) < 0.01);
+ assert.ok(cell, 'the replacement is placed on its own baseline');
+ assert.deepEqual([cell[0], cell[1], cell[2], cell[3]], [1, 0, 0, 1], 'no squeeze and no flip');
+ assert.ok(Math.abs(cell[4] - (fixture.x + 40)) < 0.01, `expected x ${fixture.x + 40}, found ${cell[4]}`);
+});
+
+test('a cell typed as zero is still drawn, with the cell\'s own placement', async () => {
+ const original = await statementPage('0.00');
+ const fixture = {...original, text: '0.00'};
+ const typed = block(fixture, {text: '0.00'});
+ const {text} = await exported(original.bytes, fixture, typed);
+ assert.match(text, /Tj|TJ/, 'the zero is shown, not dropped');
+ const cell = matrices(text).find(matrix => Math.abs(matrix[5] - fixture.y) < 0.01);
+ assert.ok(Math.abs(cell[4] - fixture.x) < 0.01, 'the value keeps the cell it belongs to');
+});
+
+test('a run inside a scaled form keeps the size and position the page showed', async () => {
+ const {bytes, font} = await formPage();
+ const fixture = formBlock(font);
+ const edit = {...fixture, text: 'Cell 11'};
+ const out = await exportNativePdf({
+  original: bytes, edits: new Map([[fixture.id, edit]]), getPage: formData(font, [fixture]), PDFLib: L,
+ });
+ const pdf = await L.PDFDocument.load(out.slice(), {updateMetadata: false});
+ const page = pdf.getPage(0);
+ // The form is rewritten into a new XObject; the page keeps pointing at one.
+ const xobjects = pdf.context.lookup(page.node.Resources().get(name('XObject')), L.PDFDict);
+ const forms = [...xobjects.entries()]
+  .map(([key, ref]) => [key, pdf.context.lookup(ref)])
+  .filter(([, value]) => value?.dict?.get(name('Subtype'))?.toString() === '/Form');
+ assert.ok(forms.length >= 1);
+ const shown = forms.map(([, form]) => latin1(L.decodePDFRawStream(form).decode())).find(content => /43656C6C203131/.test(content));
+ assert.ok(shown, 'the replacement lives inside the form it came from');
+ const painted = paintedInForm(shown);
+ assert.ok(Math.abs(painted.x - fixture.x) < 0.01, `same x: ${painted.x} vs ${fixture.x}`);
+ assert.ok(Math.abs(painted.y - (842 - fixture.y)) < 0.01, 'same baseline');
+ assert.ok(Math.abs(painted.size - fixture.size) < 0.01, `the same size on the page: ${painted.size} vs ${fixture.size}`);
+});
+
+test('a block moved out of its form is drawn on the page, so the form cannot clip it', async () => {
+ const {bytes, font} = await formPage();
+ const fixture = formBlock(font);
+ const moved = {...fixture, x: fixture.x + 60, y: fixture.y - 25};
+ const out = await exportNativePdf({
+  original: bytes, edits: new Map([[fixture.id, moved]]), getPage: formData(font, [fixture]), PDFLib: L,
+ });
+ const pdf = await L.PDFDocument.load(out.slice(), {updateMetadata: false});
+ const page = pdf.getPage(0);
+ const pageText = latin1(L.decodePDFRawStream(pdf.context.lookup(page.node.get(name('Contents')))).decode());
+ const drawn = /([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) Tm[\s\S]*?Tj/.exec(pageText);
+ assert.ok(drawn, 'the moved run is in the page stream, outside the form');
+ const [a, , , d, e, f] = drawn.slice(1, 7).map(Number);
+ assert.deepEqual([a, d], [1, 1], 'the run keeps the page\'s own units: no form matrix leaks out');
+ assert.ok(Math.abs(e - moved.x) < 0.01, `x ${e} vs ${moved.x}`);
+ assert.ok(Math.abs(f - (842 - moved.y)) < 0.01, `baseline ${f} vs ${842 - moved.y}`);
+});
