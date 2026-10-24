@@ -458,3 +458,83 @@ test('a value that sits off its column ends on the column the page uses', async 
   `the value ends on its column: ${drifted.drawn[0]} vs ${aligned.drawn[0]}`);
  for (const matrix of drifted.row) assert.ok(Math.abs(matrix[5] - rowY) < 1e-9, `the row keeps its own baseline, not ${matrix[5]}`);
 });
+
+test('a cell whose run was truncated keeps its column when the full value is typed', async () => {
+ // The producer split a cell across runs, so the run that carries it is not an
+ // amount string on its own. The value the user typed is one, and it has to end on
+ // the money column its neighbours end on instead of at the old run's left edge.
+ const pdf = await L.PDFDocument.create();
+ const font = await pdf.embedFont(L.StandardFonts.Helvetica);
+ const page = pdf.addPage([300, 200]);
+ const width = value => font.widthOfTextAtSize(value, 9);
+ const column = 60 + width('2000.00(Dr)');
+ const rowY = 40.23751;
+ const cellsText = [
+  ['2000.00(Dr)', 60], ['300.00(Dr)', column - width('300.00(Dr)')],
+  ['120.00(Dr)', column - width('120.00(Dr)')],
+  ['3000.00(Cr', column - 28 - width('3000.00(Cr')],
+ ];
+ for (const [value, x] of cellsText) page.drawText(value, {x, y: rowY, size: 9, font});
+ page.drawText(ALPHABET, {x: 20, y: 150, size: 9, font});
+ const bytes = await pdf.save();
+ const placement = {y: Math.round(viewY(rowY) * 1000) / 1000, yExact: viewY(rowY)};
+ const metricOp = (index, text) => ({...op(index, text),
+  glyphs: [...text].map(char => ({originalCharCode: char.codePointAt(0), unicode: char,
+   width: font.widthOfTextAtSize(char, 9) / 9 * 1000, isSpace: char === ' '}))});
+ const cells = cellsText.map(([text, x], index) => block(
+  {text, x, y: rowY, size: 9, width: width(text)},
+  {id: `1:${index}`, ops: [index], xExact: x, widthExact: width(text), ...placement},
+ ));
+ const out = await exportNativePdf({
+  original: bytes, edits: new Map([[cells[3].id, {...cells[3], text: '13000.00(Cr)'}]]),
+  getPage: async () => ({vp: {transform: [1, 0, 0, -1, 0, 200]},
+   info: {ops: [...cellsText.map(([text], i) => metricOp(i, text)), metricOp(cellsText.length, ALPHABET)]},
+   blocks: cells}), PDFLib: L,
+ });
+ const pdfOut = await L.PDFDocument.load(out.slice(), {updateMetadata: false});
+ const text = latin1(L.decodePDFRawStream(pdfOut.context.lookup(pdfOut.getPage(0).node.get(name('Contents')))).decode());
+ const expected = column - width('13000.00(Cr)');
+ const drawn = matrices(text).filter(matrix => Math.abs(matrix[5] - rowY) < 0.01)
+  .map(matrix => matrix[4]).filter(x => Math.abs(x - expected) < 1e-6);
+ assert.equal(drawn.length, 1, `the value is placed to end on ${column}, at ${expected}`);
+});
+
+test('a truncated run that ends on the column still anchors the retyped value', async () => {
+ // The producer ended the run on the column even though the run holds only part of
+ // the amount, so there is no drift to correct: the column edge is already met. The
+ // new value still has to end there, not at the old run's left edge.
+ const pdf = await L.PDFDocument.create();
+ const font = await pdf.embedFont(L.StandardFonts.Helvetica);
+ const page = pdf.addPage([300, 200]);
+ const width = value => font.widthOfTextAtSize(value, 9);
+ const column = 60 + width('2000.00(Dr)');
+ const rowY = 40.23751;
+ const cellsText = [
+  ['2000.00(Dr)', 60], ['300.00(Dr)', column - width('300.00(Dr)')],
+  ['120.00(Dr)', column - width('120.00(Dr)')],
+  ['3000.00(Cr', column - width('3000.00(Cr')],
+ ];
+ for (const [value, x] of cellsText) page.drawText(value, {x, y: rowY, size: 9, font});
+ page.drawText(ALPHABET, {x: 20, y: 150, size: 9, font});
+ const bytes = await pdf.save();
+ const placement = {y: Math.round(viewY(rowY) * 1000) / 1000, yExact: viewY(rowY)};
+ const metricOp = (index, text) => ({...op(index, text),
+  glyphs: [...text].map(char => ({originalCharCode: char.codePointAt(0), unicode: char,
+   width: font.widthOfTextAtSize(char, 9) / 9 * 1000, isSpace: char === ' '}))});
+ const cells = cellsText.map(([text, x], index) => block(
+  {text, x, y: rowY, size: 9, width: width(text)},
+  {id: `1:${index}`, ops: [index], xExact: x, widthExact: width(text), ...placement},
+ ));
+ const out = await exportNativePdf({
+  original: bytes, edits: new Map([[cells[3].id, {...cells[3], text: '13000.00(Cr)'}]]),
+  getPage: async () => ({vp: {transform: [1, 0, 0, -1, 0, 200]},
+   info: {ops: [...cellsText.map(([text], i) => metricOp(i, text)), metricOp(cellsText.length, ALPHABET)]},
+   blocks: cells}), PDFLib: L,
+ });
+ const pdfOut = await L.PDFDocument.load(out.slice(), {updateMetadata: false});
+ const text = latin1(L.decodePDFRawStream(pdfOut.context.lookup(pdfOut.getPage(0).node.get(name('Contents')))).decode());
+ const expected = column - width('13000.00(Cr)');
+ const drawn = matrices(text).filter(matrix => Math.abs(matrix[5] - rowY) < 0.01)
+  .map(matrix => matrix[4]).filter(x => Math.abs(x - expected) < 1e-6);
+ assert.equal(drawn.length, 1, `the value is placed to end on ${column}, at ${expected}`);
+});

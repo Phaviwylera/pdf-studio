@@ -220,7 +220,10 @@ function exactPlacement(pairs,block,segments,matrixOp,original){
   advanceAfter=textMetrics(encoder,block.text,block).width;
  }catch{return null}
  if(!Number.isFinite(advanceBefore)||!Number.isFinite(advanceAfter))return null;
- const column=valueInColumn(previous)&&valueInColumn(block.text);
+ // The typed text decides: a run that held only part of an amount (or something
+ // other than the amount) still ends where the page ended it, so the retyped value
+ // takes that right edge instead of the run's left one.
+ const column=valueInColumn(block.text);
  return {x:column?origin.x+(advanceBefore-advanceAfter):origin.x,y:origin.y,origin};
 }
 // A producer that painted the same value twice leaves the editor with two blocks
@@ -376,10 +379,12 @@ function columnEdges(blocks){
 }
 // A value that already ends on its column is left alone. One that sits off every
 // column keeps the column edge its neighbours share, so a shorter replacement does
-// not drift left of the line the rest of the page ends on.
+// not drift left of the line the rest of the page ends on. The decision follows the
+// text the user typed, not the run it replaced: a cell whose run also carried other
+// cells is not an amount string, yet its right edge is still the column's.
 function columnEdgeFor(block,original,edges){
  if(!edges?.length||!original||placementChanged(block,original))return null;
- if(!valueInColumn(original.text)||!valueInColumn(block.text))return null;
+ if(!valueInColumn(block.text))return null;
  const right=Number(original.x)+Number(original.width);
  if(!Number.isFinite(right))return null;
  const near=edges.filter(column=>column.rows.some(y=>Math.abs(y-Number(block.y))<=60));
@@ -399,7 +404,10 @@ function placedStart(block,segments,original,column=true,columnEdge=null){
  // left edge the preview shows. Applying the column rule there would snap the
  // text back into the old column and ignore the move.
  if(column&&columnEdge!==null&&columnEdge!==undefined&&Number.isFinite(Number(columnEdge)))return Number(columnEdge)-width;
- if(column&&original&&Number(original.width)>0&&valueInColumn(original.text)&&valueInColumn(block.text))return original.x+Number(original.width)-width;
+ // The right edge is the page's, so it is reused whenever the new text is a
+ // value: the run it replaced may have carried more than the amount (or only part
+ // of it), and that must not leave a retyped value at the old run's left edge.
+ if(column&&original&&Number(original.width)>0&&valueInColumn(block.text))return original.x+Number(original.width)-width;
  return block.x;
 }
 // True when the user changed where the block sits or how it is aligned. The
