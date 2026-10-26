@@ -4,7 +4,7 @@ import {translatePosition, constrainPosition} from './positioning.mjs';
 import {readCertificate, signPdfCopy, fingerprints} from './signing.mjs';
 import {makeSourceMetadataRecord, metadataJson, parseUploadedMetadata, MAX_USER_METADATA_BYTES} from './metadata.mjs';
 import * as pdfjs from './vendor/pdf.mjs';
-import { exportNativePdf, inspectSignatureProtection } from './native-export.mjs';
+import { exportNativePdf, inspectSignatureProtection, strayColumnCells, EXPORT_VERSION } from './native-export.mjs';
 import { encryptPdfCopy } from './encrypt.mjs';
 import { decryptPdfCopy } from './decrypt.mjs';
 import { encryptExportCopy, encryptedExportName, validateExportPasswords } from './export-encryption.mjs';
@@ -317,6 +317,28 @@ function showExportFeedback(message){$('export-feedback').textContent=message||'
 function syncExportMode(){const encrypted=$('export-mode-encrypted').checked;$('export-password-fields').hidden=!encrypted;for(const id of ['export-password','export-confirm'])$(id).required=encrypted;if(!encrypted)clearExportPasswords();showExportFeedback('')}
 function closeExportDialog(){if($('export-dialog').open)$('export-dialog').close();clearExportForm()}
 function openExportOptions(){finishInline();if(!doc||busy||metadataLoading)return;if(signatureState.locked){downloadOriginalCopy();return}clearExportForm();$('export-dialog').showModal()}
+// An export leaves the statement lined up: amount cells an earlier round left
+// short of their column keep their text and font and are written back onto the
+// column the rest of the page uses. Reading every page here is a text pass only;
+// a page with nothing to line up never reaches the writer.
+async function alignmentEdits(edits){
+ const aligned=new Map();
+ if(!doc)return aligned;
+ for(let n=1;n<=doc.numPages;n+=1){
+  let cells;
+  try{
+   const page=await doc.getPage(n);
+   const content=await page.getTextContent({includeMarkedContent:false});
+   const vp=page.getViewport({scale:1});
+   const items=content.items.filter(item=>item.str&&norm(item.str)).map(item=>{const t=pdfjs.Util.transform(vp.transform,item.transform);return {text:item.str,x:t[4],y:t[5],width:item.width}});
+   if(!strayColumnCells(items).length)continue;
+   const data=await getPage(n);
+   cells=strayColumnCells(data.blocks);
+  }catch{continue}
+  for(const block of cells)if((block.canEdit||block.added)&&!edits.has(block.id)&&!aligned.has(block.id))aligned.set(block.id,{...block});
+ }
+ return aligned;
+}
 async function exportPdf(event){
  event?.preventDefault?.();
  finishInline();if(!doc||busy||metadataLoading)return;
@@ -334,7 +356,13 @@ async function exportPdf(event){
  try{
   await paintQueue;
   const fileId=activeFileId();
-  const nativeBytes=await exportNativePdf({original,edits,getPage,fonts:loadedFonts,originalFonts,PDFLib,fontkit:window.fontkit,metadataRecord:sourceMetadata,uploadedMetadata,fileId,documentFonts:documentFontPlans(),headerSource:uploadedOriginal,onProgress:status});
+  // Cells that still sit short of their column are handed to the writer as edits
+  // that keep their own text, so the export lines the page up without touching
+  // what the user typed.
+  const aligned=await alignmentEdits(edits);
+  const linedUp=aligned.size;
+  const exportEdits=linedUp?new Map([...aligned,...edits]):edits;
+  const nativeBytes=await exportNativePdf({original,edits:exportEdits,getPage,fonts:loadedFonts,originalFonts,PDFLib,fontkit:window.fontkit,metadataRecord:sourceMetadata,uploadedMetadata,fileId,documentFonts:documentFontPlans(),headerSource:uploadedOriginal,onProgress:status});
   const checkedExport=await enforceFileId({bytes:nativeBytes,fileId,PDFLib});
   const bytes=checkedExport.bytes;
   let idWarning=checkedExport.status==='preserved'||checkedExport.status==='none'?'':fileIdWarning(fileId,checkedExport.actual||null);
@@ -345,13 +373,13 @@ async function exportPdf(event){
    const name=encryptedExportName(currentExportName());
    download(new Blob([protectedBytes],{type:'application/pdf'}),name);
    closeExportDialog();
-   status(`Encrypted PDF downloaded · AES-256 · ${formatBytes(protectedBytes.length)} · uploaded original ${formatBytes(uploadedOriginal.length)}${fileId&&!idWarning?' · file ID preserved':''}`);
+   status(`Encrypted PDF downloaded · AES-256 · ${formatBytes(protectedBytes.length)} · uploaded original ${formatBytes(uploadedOriginal.length)}${fileId&&!idWarning?' · file ID preserved':''}${linedUp?` · ${linedUp} amount${linedUp===1?'':'s'} lined up`:''}`);
    notice(`AES-256 password-protected PDF downloaded as “${name}”. ${uploadedMetadata?'Your edits and replaced Info/XMP metadata are included.':'Your edits and the existing native metadata are included.'} Passwords stayed in this browser and were cleared; they cannot be recovered.${idWarning?' '+idWarning:''}`)
   }else{
    download(new Blob([bytes],{type:'application/pdf'}),currentExportName());
    closeExportDialog();
-   status(`${uploadedMetadata&&!edits.size?'Exported PDF with replaced metadata':'Exported native PDF'} · ${formatBytes(bytes.length)} · uploaded original ${formatBytes(uploadedOriginal.length)}${fileId&&!idWarning?' · file ID preserved':''}`);
-   notice((uploadedMetadata?'PDF Info/XMP replaced from your JSON; omitted source fields were removed. Exported bytes and hashes changed.':'PDF exported with selectable text and existing graphics. No page images were created.')+(idWarning?' '+idWarning:''))
+   status(`${uploadedMetadata&&!edits.size?'Exported PDF with replaced metadata':'Exported native PDF'} · ${formatBytes(bytes.length)} · uploaded original ${formatBytes(uploadedOriginal.length)}${fileId&&!idWarning?' · file ID preserved':''}${linedUp?` · ${linedUp} amount${linedUp===1?'':'s'} lined up`:''}`);
+   notice((uploadedMetadata?'PDF Info/XMP replaced from your JSON; omitted source fields were removed. Exported bytes and hashes changed.':'PDF exported with selectable text and existing graphics. No page images were created.')+(linedUp?` ${linedUp} amount${linedUp===1?'':'s'} that sat short of the column ${linedUp===1?'was':'were'} put back on it; the text is unchanged.`:'')+(idWarning?' '+idWarning:''))
   }
  }catch(error){
   showExportFeedback(error.message||(encrypted?'Encrypted PDF export failed. No password was stored.':'Native PDF export failed. No image conversion was performed.'));
@@ -512,7 +540,7 @@ $('encrypt-download-hint').hidden=window.self===window.top;
 $('download-ready-newtab').onclick=()=>{window.open(location.href,'_blank','noopener')};
 async function loadFont(file){if(!file)return;try{if(!/\.(ttf|otf)$/i.test(file.name))throw new Error('Use a TTF or OTF font for native PDF export.');const family=`UploadedFont${++fontCounter}`,data=new Uint8Array(await file.arrayBuffer()),parsed=window.fontkit.create(data);if(!parsed.familyName||typeof parsed.hasGlyphForCodePoint!=='function')throw new Error('Use a single TTF/OTF font, not a font collection.');const loadedStyle=infer(parsed.subfamilyName||parsed.fullName),face=new FontFace(family,data.slice().buffer,{weight:loadedStyle.bold?'700':'400',style:loadedStyle.italic?'italic':'normal'});await face.load();document.fonts.add(face);loadedFonts.set(family,{face,data,name:file.name,parsed,style:loadedStyle});$('font').append(new Option(file.name.replace(/\.[^.]+$/,''),family));$('font').value=family;$('bold').checked=loadedStyle.bold;$('italic').checked=loadedStyle.italic;$('fontstatus').textContent=matchingStatus({...currentBlock(),font:family});notice('Font loaded: '+(parsed.fullName||file.name)+'. Use Best font match to compare its family, style and character coverage.')}catch(error){notice(error.message||'This font could not be loaded. Try a valid TTF or OTF font.')}finally{$('fontfile').value=''}}
 async function practice(){const p=await PDFLib.PDFDocument.create();const page=p.addPage([595.28,841.89]);const font=await p.embedFont(PDFLib.StandardFonts.Helvetica),bold=await p.embedFont(PDFLib.StandardFonts.HelveticaBold),italic=await p.embedFont(PDFLib.StandardFonts.HelveticaOblique);page.drawText('PRACTICE',{x:160,y:430,size:64,font:bold,color:PDFLib.rgb(.75,.82,.95),rotate:PDFLib.degrees(35),opacity:.45});page.drawText('DESIGN STUDIO',{x:54,y:775,size:20,font:bold,color:PDFLib.rgb(.1,.22,.48)});page.drawText('A document for practicing text edits',{x:54,y:747,size:12,font:italic,color:PDFLib.rgb(.4,.45,.55)});page.drawLine({start:{x:54,y:727},end:{x:540,y:727},thickness:1,color:PDFLib.rgb(.8,.85,.92)});page.drawText('Typography & alignment',{x:54,y:679,size:16,font:bold});page.drawText('Select any line to change its font, size, spacing or color.',{x:54,y:651,size:12,font});page.drawText('Change the amount below and choose Fixed decimal point.',{x:54,y:626,size:12,font});page.drawText('The original artwork stays behind the replacement text.',{x:54,y:601,size:12,font});page.drawText('Amount',{x:54,y:510,size:12,font:bold});page.drawText('1234.56',{x:410,y:510,size:16,font});page.drawText('0123456789',{x:54,y:460,size:12,font});page.drawText('Header, body and footer text can all be selected.',{x:54,y:367,size:12,font});page.drawLine({start:{x:54,y:85},end:{x:540,y:85},thickness:1,color:PDFLib.rgb(.8,.85,.92)});page.drawText('Practice document | Page 1',{x:54,y:60,size:10,font,color:PDFLib.rgb(.4,.45,.55)});const second=p.addPage([595.28,841.89]);second.drawText('Second page',{x:54,y:775,size:20,font:bold});second.drawText('Untouched pages retain their original PDF structure.',{x:54,y:733,size:12,font});const bytes=await p.save();await openFile(new File([bytes],'practice.pdf',{type:'application/pdf'}))}
-$('matchfont').onclick=chooseBestFont;$('open').onclick=$('emptyopen').onclick=()=>{if(!busy)$('file').click()};$('file').onchange=()=>openFile($('file').files[0]);$('sample').onclick=practice;$('zoom').onchange=refreshDocumentZoom;$('prev').onclick=()=>navigate(pageNo-1);$('next').onclick=()=>navigate(pageNo+1);$('add').onclick=add;$('apply').onclick=()=>{if(inline)finishInline();else apply()};$('undo').onclick=undo;$('redo').onclick=redo;$('export').onclick=openExportOptions;$('loadfont').onclick=()=>$('fontfile').click();$('fontfile').onchange=()=>loadFont($('fontfile').files[0]);$('controls').onsubmit=e=>{e.preventDefault();apply()};$('align').onchange=()=>{const b=currentBlock();if(!b)return;const previous=b.align,next=$('align').value;$('decimalhelp').hidden=next!=='decimal';if(next==='decimal'&&previous!=='decimal'&&!positionLocks.get(b.id)?.x){const ctx=canvasForPage(b.page).getContext('2d');const line=b.text.split('\n')[0],i=line.indexOf('.'),prefix=i<0?line:line.slice(0,i),gap=((b.spacing||0)+(prefix.endsWith(' ')?(b.wordSpacing||0):0))*b.scaleX;$('x').value=formatMeasure(textStart(ctx,b,line)+measure(ctx,b,prefix)+(i>0?gap:0))}};$('reset').onclick=()=>{if(!selected)return;const id=selected;commit(()=>edits.delete(id));if(originalBlock(id))select(id);else{selected=null;$('controls').hidden=true;$('selectionhint').hidden=false}};$('delete').onclick=()=>{const b=currentBlock();if(!b||!(b.canEdit||b.added))return;commit(()=>b.added?edits.delete(b.id):edits.set(b.id,{...b,removed:true}));selected=null;$('controls').hidden=true;$('selectionhint').hidden=false};document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'&&!/INPUT|TEXTAREA/.test(e.target.tagName)){e.preventDefault();e.shiftKey?redo():undo()}});for(const event of ['dragenter','dragover'])$('drop').addEventListener(event,e=>{e.preventDefault();e.dataTransfer.dropEffect='copy'});$('drop').addEventListener('drop',e=>{e.preventDefault();const file=e.dataTransfer.files[0];if(file)openFile(file)});
+$('buildtag').textContent=`export engine v${EXPORT_VERSION}`;$('matchfont').onclick=chooseBestFont;$('open').onclick=$('emptyopen').onclick=()=>{if(!busy)$('file').click()};$('file').onchange=()=>openFile($('file').files[0]);$('sample').onclick=practice;$('zoom').onchange=refreshDocumentZoom;$('prev').onclick=()=>navigate(pageNo-1);$('next').onclick=()=>navigate(pageNo+1);$('add').onclick=add;$('apply').onclick=()=>{if(inline)finishInline();else apply()};$('undo').onclick=undo;$('redo').onclick=redo;$('export').onclick=openExportOptions;$('loadfont').onclick=()=>$('fontfile').click();$('fontfile').onchange=()=>loadFont($('fontfile').files[0]);$('controls').onsubmit=e=>{e.preventDefault();apply()};$('align').onchange=()=>{const b=currentBlock();if(!b)return;const previous=b.align,next=$('align').value;$('decimalhelp').hidden=next!=='decimal';if(next==='decimal'&&previous!=='decimal'&&!positionLocks.get(b.id)?.x){const ctx=canvasForPage(b.page).getContext('2d');const line=b.text.split('\n')[0],i=line.indexOf('.'),prefix=i<0?line:line.slice(0,i),gap=((b.spacing||0)+(prefix.endsWith(' ')?(b.wordSpacing||0):0))*b.scaleX;$('x').value=formatMeasure(textStart(ctx,b,line)+measure(ctx,b,prefix)+(i>0?gap:0))}};$('reset').onclick=()=>{if(!selected)return;const id=selected;commit(()=>edits.delete(id));if(originalBlock(id))select(id);else{selected=null;$('controls').hidden=true;$('selectionhint').hidden=false}};$('delete').onclick=()=>{const b=currentBlock();if(!b||!(b.canEdit||b.added))return;commit(()=>b.added?edits.delete(b.id):edits.set(b.id,{...b,removed:true}));selected=null;$('controls').hidden=true;$('selectionhint').hidden=false};document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'&&!/INPUT|TEXTAREA/.test(e.target.tagName)){e.preventDefault();e.shiftKey?redo():undo()}});for(const event of ['dragenter','dragover'])$('drop').addEventListener(event,e=>{e.preventDefault();e.dataTransfer.dropEffect='copy'});$('drop').addEventListener('drop',e=>{e.preventDefault();const file=e.dataTransfer.files[0];if(file)openFile(file)});
 if(document.modelContext?.registerTool){try{document.modelContext.registerTool({name:'inspect_open_pdf',description:'Read the open PDF page and the selected text. Does not change or export the document.',inputSchema:{type:'object',properties:{},additionalProperties:false},annotations:{readOnlyHint:true,untrustedContentHint:true},execute:()=>({filename,page:pageNo,pages:doc?.numPages||0,changedRuns:edits.size,selection:currentBlock()?{text:currentBlock().text,font:currentBlock().fontName,size:currentBlock().size}:null})})}catch{}}
 // --- Statement arithmetic -------------------------------------------------
 // The check reads every page the same way the viewer does, applies the edits

@@ -8,6 +8,9 @@ import {fontKey} from './font-inventory.mjs';
 import {parseAmount} from './statement-check.mjs';
 const WS=c=>c===0||c===9||c===10||c===12||c===13||c===32;
 const DELIM=c=>WS(c)||'()<>[]{}/%'.includes(String.fromCharCode(c));
+// Which export engine wrote the bytes. The editor shows it, so a stale copy of
+// this module in an open tab is visible instead of being blamed on the document.
+export const EXPORT_VERSION=25;
 const ascii=bytes=>{let s='';for(let i=0;i<bytes.length;i+=8192)s+=String.fromCharCode(...bytes.subarray(i,i+8192));return s};
 const bytes=s=>Uint8Array.from(s,c=>c.charCodeAt(0));
 const number=value=>{if(!Number.isFinite(value))throw new Error('Invalid PDF text coordinate.');return String(Math.round(value*1e7)/1e7)};
@@ -130,7 +133,7 @@ function drawInPlace(block,segments,viewport,original,matrixOp=null,matrixPatche
    // only offers more than one segment for a single line.
    lineSegments=[{...segments[0],text:line}];
   }
-  let cursor=placedStart(block,lineSegments,original,!moved,columnEdge);
+  let cursor=placedStart(block,lineSegments,original,!reallyMoved(block,original),columnEdge);
   // A run that already has a producer matrix is placed from that matrix, not
   // from the preview's coordinates: same decimals, same row. A moved block has
   // no such matrix to reuse, and a squeezed one must not be inherited: text
@@ -386,21 +389,42 @@ function columnEdges(blocks){
 // and an earlier round can leave more than three of them on one page. That cluster
 // is not a column: the page's column is the edge most of its amounts end on, so a
 // cluster with a fraction of that support does not capture the value.
-function columnEdgeFor(block,original,edges){
- if(!edges?.length||!original||placementChanged(block,original))return null;
- if(!valueInColumn(block.text))return null;
- const right=Number(original.x)+Number(original.width);
- if(!Number.isFinite(right))return null;
- // Only a column close enough to be the same money column, and only ones whose
- // rows sit next to this value, can claim it.
- const near=edges.filter(column=>Math.abs(column.edge-right)<=45&&column.rows.some(y=>Math.abs(y-Number(block.y))<=60));
+// The column that can claim a value whose right edge is `right` on row `y`: only
+// the columns close enough to be the same money column and whose rows sit next to
+// it, and among those the page's own column rather than a stray cluster of cells
+// that ended short of it.
+function columnFor(right,y,edges){
+ if(!edges?.length||!Number.isFinite(right)||!Number.isFinite(y))return null;
+ const near=edges.filter(column=>Math.abs(column.edge-right)<=45&&column.rows.some(row=>Math.abs(row-y)<=60));
  if(!near.length)return null;
  const support=Math.max(...near.map(column=>column.rows.length));
  const strong=near.filter(column=>column.rows.length*2>=support);
  let chosen=null;
  for(const column of strong)if(chosen===null||Math.abs(column.edge-right)<Math.abs(chosen.edge-right))chosen=column;
- if(chosen===null||Math.abs(chosen.edge-right)<=1)return null;
+ return chosen;
+}
+function columnEdgeFor(block,original,edges){
+ if(!original||reallyMoved(block,original))return null;
+ if(!valueInColumn(block.text))return null;
+ const chosen=columnFor(Number(original.x)+Number(original.width),Number(block.y),edges);
+ if(!chosen||Math.abs(chosen.edge-(Number(original.x)+Number(original.width)))<=1)return null;
  return chosen.edge;
+}
+// Amount cells that sit short of the column the page uses. A statement that was
+// exported by an earlier round can carry a whole sub-table of them; the export
+// puts them back on the column so the page leaves the editor lined up, with the
+// same text and the same font — only the cell's right edge moves.
+export function strayColumnCells(blocks){
+ const edges=columnEdges(blocks);
+ if(!edges.length)return [];
+ const stray=[];
+ for(const block of blocks||[]){
+  if(!block||!valueInColumn(block.text)||!(Number(block.width)>0))continue;
+  const right=Number(block.x)+Number(block.width);
+  const chosen=columnFor(right,Number(block.y),edges);
+  if(chosen&&Math.abs(chosen.edge-right)>1)stray.push(block);
+ }
+ return stray;
 }
 function placedStart(block,segments,original,column=true,columnEdge=null){
  const width=segments.reduce((total,segment)=>total+textMetrics(segment.encoder,segment.text,block).width,0);
@@ -424,6 +448,14 @@ function placementChanged(block,original){
  if(!original)return false;
  const near=(a,b)=>Math.abs(Number(a)-Number(b))<=1e-3;
  return !near(block.x,original.x)||!near(block.y,original.y)||String(block.align||'left')!==String(original.align||'left');
+}
+// A block the user really moved keeps the coordinates they gave it. A difference
+// smaller than a point is the editor's own rounding and not a move, so a value
+// that was typed into its row still belongs on the row's column.
+function reallyMoved(block,original){
+ if(!original)return false;
+ const far=(a,b)=>Math.abs(Number(a)-Number(b))>1;
+ return far(block.x,original.x)||far(block.y,original.y)||String(block.align||'left')!==String(original.align||'left');
 }
 function inverse(m){const [a,b,c,d,e,f]=m,det=a*d-b*c;if(!det)throw new Error('Invalid PDF viewport.');return [d/det,-b/det,-c/det,a/det,(c*f-d*e)/det,(b*e-a*f)/det]}
 // The scale a form's matrix chain applies to the text drawn inside it. The

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createRequire} from 'node:module';
-import {exportNativePdf, documentHexEncoder} from '../dist/native-export.mjs';
+import {exportNativePdf, documentHexEncoder, strayColumnCells} from '../dist/native-export.mjs';
 import {alignHeader} from '../dist/header-marker.mjs';
 
 const require = createRequire(import.meta.url);
@@ -569,7 +569,7 @@ async function strayRows({columns, stray = 28, height = 400} = {}) {
  return {bytes: await pdf.save(), font, width, cells, height, stray: {debit: stray0[0], credit: stray1[0]}};
 }
 
-async function rewriteCell(fixture, index, text) {
+async function rewriteCell(fixture, index, text, {dx = 0} = {}) {
  const {bytes, font, width, cells, height} = fixture;
  const metricOp = (position, value) => ({...op(position, value),
   glyphs: [...value].map(char => ({originalCharCode: char.codePointAt(0), unicode: char,
@@ -581,15 +581,17 @@ async function rewriteCell(fixture, index, text) {
  ));
  const target = cells[index];
  const out = await exportNativePdf({
-  original: bytes, edits: new Map([[blocks[index].id, {...blocks[index], text}]]),
+  original: bytes, edits: new Map([[blocks[index].id, {...blocks[index], text, x: blocks[index].x + dx}]]),
   getPage: async () => ({vp: {transform: [1, 0, 0, -1, 0, height]},
    info: {ops: [...cells.map((cell, position) => metricOp(position, cell.text)), metricOp(cells.length, ALPHABET)]},
    blocks}), PDFLib: L,
  });
  const pdfOut = await L.PDFDocument.load(out.slice(), {updateMetadata: false});
  const content = latin1(L.decodePDFRawStream(pdfOut.context.lookup(pdfOut.getPage(0).node.get(name('Contents')))).decode());
+ // Everything on the row except the run that was replaced: the cell may end up
+ // exactly where an untouched neighbour already sits, which is the point.
  const drawn = matrices(content).filter(matrix => Math.abs(matrix[5] - target.pdfY) < 0.01)
-  .map(matrix => matrix[4]).filter(x => !cells.some(cell => Math.abs(cell.x - x) < 1e-6));
+  .map(matrix => matrix[4]).filter(x => Math.abs(x - target.x) > 1e-6);
  return {drawn, width: width(text), edge: target.right};
 }
 
@@ -598,9 +600,8 @@ test('a stray cluster of short amounts does not hold a retyped value off the col
  // The five short rows end 28 pt left of the column eleven other rows end on. A
  // retyped value there belongs on the page's column, not on the stray cluster.
  const {drawn, width, edge} = await rewriteCell(fixture, fixture.stray.debit, '3100.00(Dr)');
- assert.equal(drawn.length, 1, 'the retyped value is drawn once');
- assert.ok(Math.abs(drawn[0] + width - 200) < 1e-6,
-  `the value ends at ${drawn[0] + width} (was ${edge}), its column is 200`);
+ assert.ok(drawn.some(x => Math.abs(x + width - 200) < 1e-6),
+  `the value ends on 200 (was ${edge}): ${drawn.map(x => x + width).join(', ')}`);
 });
 
 test('a stray value on the credit side is put back on the credit column', async () => {
@@ -608,16 +609,47 @@ test('a stray value on the credit side is put back on the credit column', async 
  // 270 - 28 = 242 is also 42 pt from the debit column; the credit column is the
  // page's own column for these values and the nearer of the two.
  const {drawn, width, edge} = await rewriteCell(fixture, fixture.stray.credit, '3100.00(Cr)');
- assert.equal(drawn.length, 1, 'the retyped value is drawn once');
- assert.ok(Math.abs(drawn[0] + width - 270) < 1e-6,
-  `the value ends at ${drawn[0] + width} (was ${edge}), its column is 270`);
+ assert.ok(drawn.some(x => Math.abs(x + width - 270) < 1e-6),
+  `the value ends on 270 (was ${edge}): ${drawn.map(x => x + width).join(', ')}`);
 });
 
 test('a value that already ends on its column is not moved', async () => {
  const fixture = await strayRows({columns: {debit: 200}});
  // Every one of these rows ends on 200, next to five rows that do not.
  const {drawn, width} = await rewriteCell(fixture, 0, '3100.00(Dr)');
- assert.equal(drawn.length, 1, 'the retyped value is drawn once');
- assert.ok(Math.abs(drawn[0] + width - 200) < 1e-6,
-  `the value ends at ${drawn[0] + width}, its column is 200`);
+ assert.ok(drawn.some(x => Math.abs(x + width - 200) < 1e-6),
+  `the value ends on 200: ${drawn.map(x => x + width).join(', ')}`);
+});
+
+test('a value nudged by less than a point is still put on its column', async () => {
+ const fixture = await strayRows({columns: {debit: 200}});
+ // Typing in a cell can leave the block a fraction of a point off its own
+ // coordinates. That is not a move, so the column rule still applies.
+ const {drawn, width} = await rewriteCell(fixture, 0, '3100.00(Dr)', {dx: 0.4});
+ assert.ok(drawn.some(x => Math.abs(x + width - 200) < 1e-6),
+  `the value ends on 200: ${drawn.map(x => x + width).join(', ')}`);
+});
+
+test('the page names the amount cells that sit short of its column', async () => {
+ const fixture = await strayRows({columns: {debit: 200, credit: 270}});
+ const blocks = fixture.cells.map((cell, index) => block(
+  {text: cell.text, x: cell.x, y: cell.pdfY, size: 9, width: fixture.width(cell.text)},
+  {id: `1:${index}`, ops: [index], xExact: cell.x, widthExact: fixture.width(cell.text),
+   y: fixture.height - cell.pdfY, yExact: fixture.height - cell.pdfY},
+ ));
+ const stray = strayColumnCells(blocks).map(cell => cell.text);
+ // The five short rows on each side, and nothing that already ends on a column.
+ assert.equal(stray.filter(text => text === '300.00(Dr)').length, 5);
+ assert.equal(stray.filter(text => text === '300.00(Cr)').length, 5);
+ assert.equal(stray.filter(text => text === '200.00(Dr)').length, 0);
+ assert.equal(stray.filter(text => text === '200.00(Cr)').length, 0);
+});
+
+test('a cell handed to the writer with its own text moves onto the column and keeps the text', async () => {
+ const fixture = await strayRows({columns: {debit: 200}});
+ const {drawn, width} = await rewriteCell(fixture, fixture.stray.debit, '300.00(Dr)');
+ // Its text does not change, so the cell is only re-placed: it now ends on the
+ // column, exactly where the untouched cell above it ends.
+ assert.ok(drawn.some(x => Math.abs(x + width - 200) < 1e-6),
+  `the cell ends on 200: ${drawn.map(x => x + width).join(', ')}`);
 });
