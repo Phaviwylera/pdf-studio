@@ -382,17 +382,25 @@ function columnEdges(blocks){
 // not drift left of the line the rest of the page ends on. The decision follows the
 // text the user typed, not the run it replaced: a cell whose run also carried other
 // cells is not an amount string, yet its right edge is still the column's.
+// A handful of cells that all ended short of the line form a cluster of their own,
+// and an earlier round can leave more than three of them on one page. That cluster
+// is not a column: the page's column is the edge most of its amounts end on, so a
+// cluster with a fraction of that support does not capture the value.
 function columnEdgeFor(block,original,edges){
  if(!edges?.length||!original||placementChanged(block,original))return null;
  if(!valueInColumn(block.text))return null;
  const right=Number(original.x)+Number(original.width);
  if(!Number.isFinite(right))return null;
- const near=edges.filter(column=>column.rows.some(y=>Math.abs(y-Number(block.y))<=60));
+ // Only a column close enough to be the same money column, and only ones whose
+ // rows sit next to this value, can claim it.
+ const near=edges.filter(column=>Math.abs(column.edge-right)<=45&&column.rows.some(y=>Math.abs(y-Number(block.y))<=60));
  if(!near.length)return null;
- let nearest=null;
- for(const column of near)if(nearest===null||Math.abs(column.edge-right)<Math.abs(nearest-right))nearest=column.edge;
- if(nearest===null||Math.abs(nearest-right)<=1||Math.abs(nearest-right)>45)return null;
- return nearest;
+ const support=Math.max(...near.map(column=>column.rows.length));
+ const strong=near.filter(column=>column.rows.length*2>=support);
+ let chosen=null;
+ for(const column of strong)if(chosen===null||Math.abs(column.edge-right)<Math.abs(chosen.edge-right))chosen=column;
+ if(chosen===null||Math.abs(chosen.edge-right)<=1)return null;
+ return chosen.edge;
 }
 function placedStart(block,segments,original,column=true,columnEdge=null){
  const width=segments.reduce((total,segment)=>total+textMetrics(segment.encoder,segment.text,block).width,0);
