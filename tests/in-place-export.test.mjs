@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createRequire} from 'node:module';
-import {exportNativePdf, documentHexEncoder, strayColumnCells} from '../dist/native-export.mjs';
+import {exportNativePdf, documentHexEncoder, strayColumnCells, alignedStart, columnEdges, decimalAnchorFix} from '../dist/native-export.mjs';
 import {alignHeader} from '../dist/header-marker.mjs';
 
 const require = createRequire(import.meta.url);
@@ -22,7 +22,8 @@ async function statementPage(text, {x = 150, y = 150, size = 9} = {}) {
  const page = pdf.addPage([300, 200]);
  page.drawText(text, {x, y, size, font});
  page.drawText(ALPHABET, {x: 20, y: 20, size, font});
- return {bytes: await pdf.save(), width: font.widthOfTextAtSize(text, size), x, y, size};
+ return {bytes: await pdf.save(), width: font.widthOfTextAtSize(text, size), x, y, size,
+  measure: value => font.widthOfTextAtSize(value, size)};
 }
 
 function glyphs(text) {
@@ -652,4 +653,71 @@ test('a cell handed to the writer with its own text moves onto the column and ke
  // column, exactly where the untouched cell above it ends.
  assert.ok(drawn.some(x => Math.abs(x + width - 200) < 1e-6),
   `the cell ends on 200: ${drawn.map(x => x + width).join(', ')}`);
+});
+
+test('a value switched to fixed decimal keeps the decimal point where the editor shows it', async () => {
+ const fixture = {...await statementPage('3000.00(Dr)', {x: 100}), text: '3000.00(Dr)'};
+ const page = block(fixture);
+ // The widths the writer reads come from the page's own glyph metrics.
+ const metricOp = (position, value) => ({...op(position, value),
+  glyphs: [...value].map(char => ({originalCharCode: char.codePointAt(0), unicode: char,
+   width: fixture.measure(char) / fixture.size * 1000, isSpace: char === ' '}))});
+ // Choosing "fixed decimal" rewrites x to the decimal point and leaves the run
+ // where the preview drew it; the export has to honour that point, not the end
+ // of the run.
+ const point = page.x + fixture.measure('3000');
+ const edit = {...page, align: 'decimal', x: point};
+ const bytes = await exportNativePdf({
+  original: fixture.bytes, edits: new Map([[edit.id, edit]]),
+  getPage: async () => ({vp: {transform: [1, 0, 0, -1, 0, 200]},
+   info: {ops: [metricOp(0, fixture.text), metricOp(1, ALPHABET)]}, blocks: [page]}), PDFLib: L,
+ });
+ const pdf = await L.PDFDocument.load(bytes.slice(), {updateMetadata: false});
+ const content = latin1(L.decodePDFRawStream(pdf.context.lookup(pdf.getPage(0).node.get(name('Contents')))).decode());
+ const drawn = matrices(content).filter(matrix => Math.abs(matrix[5] - 150) < 0.01).map(matrix => matrix[4]);
+ const start = drawn.find(x => Math.abs(x + fixture.measure('3000') - point) < 1e-6);
+ assert.ok(start !== undefined,
+  `the run starts where the point says it does (${drawn.join(', ')})`);
+ // The writer and the editor's own canvas math must agree, or the PDF shows
+ // something the preview never did.
+ const encoder = value => ({width: fixture.measure(value), count: [...value].length});
+ assert.ok(Math.abs(start - alignedStart(encoder, edit.text, edit)) < 1e-6,
+  `written ${start}, shown ${alignedStart(encoder, edit.text, edit)}`);
+});
+
+const columnBlocks = (fixture, cells = fixture.cells) => cells.map((cell, index) => block(
+ {text: cell.text, x: cell.x, y: cell.pdfY, size: 9, width: fixture.width(cell.text)},
+ {id: `1:${index}`, ops: [index], xExact: cell.x, widthExact: fixture.width(cell.text),
+  y: fixture.height - cell.pdfY, yExact: fixture.height - cell.pdfY},
+));
+
+test('a decimal point taken from a short left edge is put back on the column', async () => {
+ const fixture = await strayRows({columns: {debit: 200}});
+ const blocks = columnBlocks(fixture);
+ const edges = columnEdges(blocks);
+ const fraction = fixture.width('.00(Dr)');
+ // This is what "fixed decimal" stores for a cell that was already 28 pt short:
+ // the point sits one fraction width left of where it belongs.
+ const short = blocks.find(entry => entry.text === '300.00(Dr)');
+ const decimal = {...short, align: 'decimal', x: 172 - fraction};
+ const fixed = decimalAnchorFix(decimal, edges, value => fixture.width(value));
+ assert.ok(fixed !== null, 'the straddled run is recognised');
+ assert.ok(Math.abs(fixed + fraction - 200) < 1e-6,
+  `the run ends on 200, it ended at ${fixed + fraction}`);
+ assert.equal(fixed, decimal.x + 28, 'only the anchor moved');
+});
+
+test('a decimal run that already ends on its column is left where it is', async () => {
+ const fixture = await strayRows({columns: {debit: 200}});
+ const blocks = columnBlocks(fixture);
+ const edges = columnEdges(blocks);
+ const fraction = fixture.width('.00(Dr)');
+ const onColumn = {...blocks.find(entry => entry.text === '200.00(Dr)'), align: 'decimal', x: 200 - fraction};
+ assert.equal(decimalAnchorFix(onColumn, edges, value => fixture.width(value)), null);
+ // A decimal column the page genuinely uses is not dragged sideways just
+ // because a wider column exists further right: 12 rows end on 172, 11 on 200.
+ const own = {...blocks.find(entry => entry.text === '300.00(Dr)'), align: 'decimal', x: 172 - fraction};
+ const crowded = [...blocks, ...Array.from({length: 7}, (_, rest) => ({...own,
+  id: `1:extra:${rest}`, y: 300 + rest * 12, ops: []}))];
+ assert.equal(decimalAnchorFix(own, columnEdges(crowded), value => fixture.width(value)), null);
 });

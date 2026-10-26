@@ -10,7 +10,7 @@ const WS=c=>c===0||c===9||c===10||c===12||c===13||c===32;
 const DELIM=c=>WS(c)||'()<>[]{}/%'.includes(String.fromCharCode(c));
 // Which export engine wrote the bytes. The editor shows it, so a stale copy of
 // this module in an open tab is visible instead of being blamed on the document.
-export const EXPORT_VERSION=25;
+export const EXPORT_VERSION=26;
 const ascii=bytes=>{let s='';for(let i=0;i<bytes.length;i+=8192)s+=String.fromCharCode(...bytes.subarray(i,i+8192));return s};
 const bytes=s=>Uint8Array.from(s,c=>c.charCodeAt(0));
 const number=value=>{if(!Number.isFinite(value))throw new Error('Invalid PDF text coordinate.');return String(Math.round(value*1e7)/1e7)};
@@ -366,7 +366,7 @@ function exactBlock(block,original){
 // the page as it was opened, so a value the user retyped cannot redefine a column.
 // Each column remembers which rows it covers: a value is only put back into a column
 // that its own part of the table uses, never one from another block of figures.
-function columnEdges(blocks){
+export function columnEdges(blocks){
  const rights=(blocks||[]).filter(block=>valueInColumn(block.text)&&Number(block.width)>0)
   .map(block=>({right:Number(block.x)+Number(block.width),y:Number(block.y)}))
   .filter(entry=>Number.isFinite(entry.right)&&Number.isFinite(entry.y)).sort((a,b)=>a.right-b.right);
@@ -410,6 +410,24 @@ function columnEdgeFor(block,original,edges){
  if(!chosen||Math.abs(chosen.edge-(Number(original.x)+Number(original.width)))<=1)return null;
  return chosen.edge;
 }
+// A decimal-aligned run is anchored at its decimal point, so where its column is
+// can only be read from where the run ends. A page written by an earlier round
+// carries cells whose point was computed from a left edge that was already short;
+// such a run ends exactly one fraction width short of the column, and that is the
+// signature this repairs — an ordinary decimal column is left alone.
+export function decimalAnchorFix(block,edges,widthOf){
+ if(!block||block.align!=='decimal'||!valueInColumn(block.text))return null;
+ const text=String(block.text??''),index=text.indexOf('.');
+ if(index<0||typeof widthOf!=='function')return null;
+ const suffix=text.slice(index),width=Number(widthOf(suffix,block));
+ if(!Number.isFinite(width)||width<=1||width>45)return null;
+ const right=Number(block.x)+width;
+ const chosen=columnFor(right,Number(block.y),edges);
+ if(!chosen)return null;
+ const shift=chosen.edge-right;
+ if(Math.abs(shift)<=1||Math.abs(shift-width)>1)return null;
+ return Number(block.x)+shift;
+}
 // Amount cells that sit short of the column the page uses. A statement that was
 // exported by an earlier round can carry a whole sub-table of them; the export
 // puts them back on the column so the page leaves the editor lined up, with the
@@ -420,15 +438,44 @@ export function strayColumnCells(blocks){
  const stray=[];
  for(const block of blocks||[]){
   if(!block||!valueInColumn(block.text)||!(Number(block.width)>0))continue;
+  // A decimal-aligned run is anchored at the point its author chose, not at a
+  // right edge, so its column cannot be checked by where the run ends.
+  if(block.align==='decimal')continue;
   const right=Number(block.x)+Number(block.width);
   const chosen=columnFor(right,Number(block.y),edges);
   if(chosen&&Math.abs(chosen.edge-right)>1)stray.push(block);
  }
  return stray;
 }
+// The editor anchors a decimal-aligned run at its decimal point: the canvas
+// draws from `x - width(prefix)`, and switching a run to "fixed decimal" rewrites
+// x to exactly that point. The writer has to put the point there too — measuring
+// the whole run instead would leave the value one ".##(Dr)" short of where the
+// preview shows it, which is the whole difference between a lined-up column and
+// a cell that reads 28 pt out of line on the next export.
+function decimalStart(block,segments){
+ const text=segments.map(segment=>segment.text).join('');
+ const index=text.indexOf('.');
+ if(index<0)return null;
+ const prefix=text.slice(0,index);
+ const gap=(block.spacing||0)+(prefix.endsWith(' ')?(block.wordSpacing||0):0);
+ let consumed=0,width=0;
+ for(const segment of segments){
+  const slice=prefix.slice(consumed);
+  if(slice)width+=textMetrics(segment.encoder,slice,block).width;
+  consumed+=segment.text.length;
+  if(consumed>=prefix.length)break;
+ }
+ return block.x-width-(index>0?gap:0);
+}
 function placedStart(block,segments,original,column=true,columnEdge=null){
  const width=segments.reduce((total,segment)=>total+textMetrics(segment.encoder,segment.text,block).width,0);
- if(block.align==='decimal')return block.x-width;
+ if(block.align==='decimal'){
+  const start=decimalStart(block,segments);
+  // A decimal-aligned run with no point in it has no anchor to honour, so it
+  // falls through to the column rules like any other value.
+  if(start!==null)return start;
+ }
  if(block.align==='right')return block.x-width;
  if(block.align==='center')return block.x-width/2;
  // The right edge of a money column is only kept for a value that was edited in
