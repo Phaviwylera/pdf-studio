@@ -4,7 +4,7 @@ import {translatePosition, constrainPosition} from './positioning.mjs';
 import {readCertificate, signPdfCopy, fingerprints} from './signing.mjs';
 import {makeSourceMetadataRecord, metadataJson, parseUploadedMetadata, MAX_USER_METADATA_BYTES} from './metadata.mjs';
 import * as pdfjs from './vendor/pdf.mjs';
-import { exportNativePdf, inspectSignatureProtection, strayColumnCells, EXPORT_VERSION } from './native-export.mjs';
+import { exportNativePdf, inspectSignatureProtection, strayColumnCells, columnEdges, decimalAnchorFix, EXPORT_VERSION } from './native-export.mjs';
 import { encryptPdfCopy } from './encrypt.mjs';
 import { decryptPdfCopy } from './decrypt.mjs';
 import { encryptExportCopy, encryptedExportName, validateExportPasswords } from './export-encryption.mjs';
@@ -324,18 +324,38 @@ function openExportOptions(){finishInline();if(!doc||busy||metadataLoading)retur
 async function alignmentEdits(edits){
  const aligned=new Map();
  if(!doc)return aligned;
+ // Only a page that carries an edited decimal run needs its columns read for it.
+ const decimalPages=new Set([...edits.values()].filter(block=>block.align==='decimal').map(block=>block.page));
  for(let n=1;n<=doc.numPages;n+=1){
-  let cells;
+  let cells=[],fixes=[];
   try{
    const page=await doc.getPage(n);
    const content=await page.getTextContent({includeMarkedContent:false});
    const vp=page.getViewport({scale:1});
    const items=content.items.filter(item=>item.str&&norm(item.str)).map(item=>{const t=pdfjs.Util.transform(vp.transform,item.transform);return {text:item.str,x:t[4],y:t[5],width:item.width}});
-   if(!strayColumnCells(items).length)continue;
+   if(!strayColumnCells(items).length&&!decimalPages.has(n))continue;
    const data=await getPage(n);
    cells=strayColumnCells(data.blocks);
+   // A decimal-aligned run is anchored at its point, so a page that carries one
+   // needs the same treatment read from where those runs end.
+   const edges=columnEdges(data.blocks);
+   const ctx=scratch.getContext('2d');
+   if(ctx&&edges.length){
+    const widthOf=(text,block)=>measure(ctx,block,text);
+    const seen=new Set();
+    const candidates=[...data.blocks,...[...edits.values()].filter(block=>block.page===n&&block.added)];
+    for(const block of candidates){
+     if(!block||block.removed||seen.has(block.id))continue;
+     seen.add(block.id);
+     const current=edits.get(block.id)||block;
+     if(current.align!=='decimal'||current.removed)continue;
+     const x=decimalAnchorFix(current,edges,widthOf);
+     if(x!==null)fixes.push({...current,x});
+    }
+   }
   }catch{continue}
   for(const block of cells)if((block.canEdit||block.added)&&!edits.has(block.id)&&!aligned.has(block.id))aligned.set(block.id,{...block});
+  for(const block of fixes)if(block.canEdit||block.added)aligned.set(block.id,block);
  }
  return aligned;
 }
@@ -361,7 +381,10 @@ async function exportPdf(event){
   // what the user typed.
   const aligned=await alignmentEdits(edits);
   const linedUp=aligned.size;
-  const exportEdits=linedUp?new Map([...aligned,...edits]):edits;
+  const exportEdits=new Map(aligned);
+  // The user's text, font and styling win; where a cell was put back on its
+  // column, only its anchor moves, and it is the cell they just typed in.
+  for(const [id,block] of edits)exportEdits.set(id,aligned.has(id)?{...block,x:aligned.get(id).x}:block);
   const nativeBytes=await exportNativePdf({original,edits:exportEdits,getPage,fonts:loadedFonts,originalFonts,PDFLib,fontkit:window.fontkit,metadataRecord:sourceMetadata,uploadedMetadata,fileId,documentFonts:documentFontPlans(),headerSource:uploadedOriginal,onProgress:status});
   const checkedExport=await enforceFileId({bytes:nativeBytes,fileId,PDFLib});
   const bytes=checkedExport.bytes;
