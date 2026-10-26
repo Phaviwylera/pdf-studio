@@ -538,3 +538,86 @@ test('a truncated run that ends on the column still anchors the retyped value', 
   .map(matrix => matrix[4]).filter(x => Math.abs(x - expected) < 1e-6);
  assert.equal(drawn.length, 1, `the value is placed to end on ${column}, at ${expected}`);
 });
+
+// A statement whose amounts a previous round (or the producer itself) left short
+// of the money columns. The stray cells line up with each other, so they form a
+// cluster of their own; the page's real columns still carry most of the amounts.
+async function strayRows({columns, stray = 28, height = 400} = {}) {
+ const pdf = await L.PDFDocument.create();
+ const font = await pdf.embedFont(L.StandardFonts.Helvetica);
+ const page = pdf.addPage([300, height]);
+ const width = value => font.widthOfTextAtSize(value, 9);
+ const cells = [];
+ const add = (text, right, pdfY) => {
+  const x = right - width(text);
+  cells.push({text, x, right, pdfY});
+  page.drawText(text, {x, y: pdfY, size: 9, font});
+ };
+ // Five of sixteen rows sit short of the columns; each one stays next to rows
+ // that use the real column.
+ const stray0 = [], stray1 = [];
+ for (let i = 0; i < 16; i += 1) {
+  const offset = i % 3 === 1 ? stray : 0, pdfY = 40 + i * 22.5;
+  add(offset ? '300.00(Dr)' : '200.00(Dr)', columns.debit - offset, pdfY);
+  if (offset && !stray0.length) stray0.push(cells.length - 1);
+  if (columns.credit !== undefined) {
+   add(offset ? '300.00(Cr)' : '200.00(Cr)', columns.credit - offset, pdfY);
+   if (offset && !stray1.length) stray1.push(cells.length - 1);
+  }
+ }
+ page.drawText(ALPHABET, {x: 20, y: 20, size: 9, font});
+ return {bytes: await pdf.save(), font, width, cells, height, stray: {debit: stray0[0], credit: stray1[0]}};
+}
+
+async function rewriteCell(fixture, index, text) {
+ const {bytes, font, width, cells, height} = fixture;
+ const metricOp = (position, value) => ({...op(position, value),
+  glyphs: [...value].map(char => ({originalCharCode: char.codePointAt(0), unicode: char,
+   width: font.widthOfTextAtSize(char, 9) / 9 * 1000, isSpace: char === ' '}))});
+ const blocks = cells.map((cell, position) => block(
+  {text: cell.text, x: cell.x, y: cell.pdfY, size: 9, width: width(cell.text)},
+  {id: `1:${position}`, ops: [position], xExact: cell.x, widthExact: width(cell.text),
+   y: height - cell.pdfY, yExact: height - cell.pdfY},
+ ));
+ const target = cells[index];
+ const out = await exportNativePdf({
+  original: bytes, edits: new Map([[blocks[index].id, {...blocks[index], text}]]),
+  getPage: async () => ({vp: {transform: [1, 0, 0, -1, 0, height]},
+   info: {ops: [...cells.map((cell, position) => metricOp(position, cell.text)), metricOp(cells.length, ALPHABET)]},
+   blocks}), PDFLib: L,
+ });
+ const pdfOut = await L.PDFDocument.load(out.slice(), {updateMetadata: false});
+ const content = latin1(L.decodePDFRawStream(pdfOut.context.lookup(pdfOut.getPage(0).node.get(name('Contents')))).decode());
+ const drawn = matrices(content).filter(matrix => Math.abs(matrix[5] - target.pdfY) < 0.01)
+  .map(matrix => matrix[4]).filter(x => !cells.some(cell => Math.abs(cell.x - x) < 1e-6));
+ return {drawn, width: width(text), edge: target.right};
+}
+
+test('a stray cluster of short amounts does not hold a retyped value off the column', async () => {
+ const fixture = await strayRows({columns: {debit: 200}});
+ // The five short rows end 28 pt left of the column eleven other rows end on. A
+ // retyped value there belongs on the page's column, not on the stray cluster.
+ const {drawn, width, edge} = await rewriteCell(fixture, fixture.stray.debit, '3100.00(Dr)');
+ assert.equal(drawn.length, 1, 'the retyped value is drawn once');
+ assert.ok(Math.abs(drawn[0] + width - 200) < 1e-6,
+  `the value ends at ${drawn[0] + width} (was ${edge}), its column is 200`);
+});
+
+test('a stray value on the credit side is put back on the credit column', async () => {
+ const fixture = await strayRows({columns: {debit: 200, credit: 270}});
+ // 270 - 28 = 242 is also 42 pt from the debit column; the credit column is the
+ // page's own column for these values and the nearer of the two.
+ const {drawn, width, edge} = await rewriteCell(fixture, fixture.stray.credit, '3100.00(Cr)');
+ assert.equal(drawn.length, 1, 'the retyped value is drawn once');
+ assert.ok(Math.abs(drawn[0] + width - 270) < 1e-6,
+  `the value ends at ${drawn[0] + width} (was ${edge}), its column is 270`);
+});
+
+test('a value that already ends on its column is not moved', async () => {
+ const fixture = await strayRows({columns: {debit: 200}});
+ // Every one of these rows ends on 200, next to five rows that do not.
+ const {drawn, width} = await rewriteCell(fixture, 0, '3100.00(Dr)');
+ assert.equal(drawn.length, 1, 'the retyped value is drawn once');
+ assert.ok(Math.abs(drawn[0] + width - 200) < 1e-6,
+  `the value ends at ${drawn[0] + width}, its column is 200`);
+});
