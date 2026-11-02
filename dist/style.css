@@ -46,3 +46,9 @@ dialog{width:min(640px,92vw);max-height:85vh;overflow:auto;border:1px solid #dce
 /* Statement layout: kept with the open document, shown beside the header actions. */
 .bankprofile{display:flex;align-items:center;gap:8px;font-size:.875rem;color:#586a85;white-space:nowrap}
 .bankprofile select{width:auto;padding:6px 8px;font-size:.875rem}
+/* AI edit: the row list that leaves this browser, and the values that came back. */
+#ai-dialog{width:min(720px,94vw)}
+#ai-log{max-height:32vh;overflow:auto}
+#ai-examples{display:flex;flex-wrap:wrap;gap:8px;border-top:0;margin:4px 0 12px;padding-top:0}
+#ai-examples button{font-size:.75rem;padding:5px 8px}
+#ai-instruction{min-height:76px;resize:vertical}

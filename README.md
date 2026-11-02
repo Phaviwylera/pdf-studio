@@ -112,6 +112,19 @@ PDF Studio captures the `/ID` pair from the bytes you upload, before any in-brow
 
 Restoring the identifier does not restore the original fingerprint: text edits, metadata replacement, encryption and re-saving all change the file bytes, so SHA-256/SHA-512 differ. It only makes the document identifier match again.
 
+## AI edit
+
+**AI edit** in the header rewrites chosen cells from a written instruction — "round every amount and balance to the nearest rupee", "add 100 to every credit and carry the balances forward", "rename every NEFT row".
+
+- **Only values change.** The model never receives the PDF. It receives one text line per row (`row|date|narration|amount|balance`) and answers with `{"changes":[{"row":0,"field":"balance","value":"1,00,300.50"}]}`. The editor turns each entry into a replacement of one existing text run: the run's font, size, colour, spacing and position, the number of cells, the page layout, the document's metadata and its file ID are all carried over untouched. Nothing in a plan can add, remove or move a cell.
+- **The format is enforced, not requested.** A returned number is parsed and re-rendered in the shape of the cell it replaces (`formatAmountLike`), so a model answering `Rs 1,00,234.5` still writes `1,00,234.50`, lakh grouping and the Dr/Cr style included. Dates are re-rendered with the cell's own separators and order. A proposal for a row that does not exist, a field the run may not touch, a duplicate, a value that is already there, or a figure that will not parse is dropped and reported.
+- **One undo step.** The whole run is committed as a single edit, so Ctrl/Cmd+Z removes it in one go. The dialog lists every change (`page 3 · balance · 1,00,234.50 → 1,00,300.50`) and every skipped proposal.
+- **What leaves the browser** — and the only thing that does — is that row list, sent to the provider chosen in the dialog with a key you supply. No PDF bytes, no fonts, no metadata, no file ID. The key is held in the tab's memory, sent only to that endpoint, and cleared when the dialog closes.
+
+Free routes are offered first: **Google Gemini** (free tier key from AI Studio), **Groq** (free tier), **OpenRouter** (`:free` models), and **Ollama** on your own computer — no account, no network, with `OLLAMA_ORIGINS=*` set so the page may call it. OpenAI and any other OpenAI-compatible endpoint, including your own proxy, are there too.
+
+`dist/ai-edit.mjs` is pure and testable without a browser: `buildRequest`, `buildPrompt`, `parsePlan`, `planCells`, `validatePlan`, `applyPlan`, `formattedValue`, `formatDateLike`.
+
 ## Statement check
 
 New text is drawn in the page's own font by default — **Original PDF font** in the font list — so a value typed into a statement is written with the same program as the values around it, and the export reuses that font dictionary instead of embedding a substitute.

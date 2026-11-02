@@ -184,3 +184,34 @@ test('new text is written with the page own font and can be set back to it', asy
  assert.match(app, /b\.added&&b\.fontId&&originalRecord\(b\)/);
  assert.match(app, /Original PDF font/);
 });
+
+test('AI edit asks for a change in words and only ever rewrites a value', async () => {
+ const html = await read('../dist/index.html');
+ const app = await read('../dist/app.mjs');
+ // The action sits with the other document actions and is closed while locked.
+ assert.match(html, /<button id="ai" disabled/);
+ assert.match(app, /\$\('ai'\)\.disabled=!doc\|\|busy\|\|metadataLoading\|\|signatureState\.locked/);
+ assert.match(html, /<dialog id="ai-dialog">/);
+ assert.match(app, /function openAiDialog\(\)/);
+ assert.match(app, /\$\('ai'\)\.onclick=openAiDialog/);
+ // The provider list, the model and endpoint fields, and the two limits.
+ assert.match(app, /for\(const id of PROVIDER_ORDER\)\$\('ai-provider'\)\.append/);
+ assert.match(app, /for\(const id of SCOPE_ORDER\)\$\('ai-scope'\)\.append/);
+ assert.match(app, /for\(const id of TARGET_ORDER\)\$\('ai-targets'\)\.append/);
+ // The run goes through the same validation the module tests cover.
+ assert.match(app, /const request=buildRequest\(\{provider,endpoint,model,key,prompt\}\)/);
+ assert.match(app, /const plan=validatePlan\(changes,cells,\{targets\}\)/);
+ assert.match(app, /const blocks=applyPlan\(plan\.accepted/);
+ // One undo step for the whole run, never a per-cell history entry.
+ const run = app.slice(app.indexOf('async function runAiEdit'), app.indexOf('async function runStatementCheck'));
+ const commits = [...run.matchAll(/commit\(/g)];
+ assert.equal(commits.length, 1, 'the whole run is one commit');
+ assert.match(run, /commit\(\(\)=>\{for\(const block of blocks\)edits\.set\(block\.id,block\)\}\)/);
+ // The key is cleared when the dialog closes and is never written anywhere.
+ assert.match(app, /\$\('ai-key'\)\.value='';\$\('ai-dialog'\)\.close\(\)/g);
+ assert.doesNotMatch(app, /localStorage\.setItem\([^)]*ai-key/);
+ assert.doesNotMatch(app, /sessionStorage\.setItem\([^)]*ai-key/);
+ // The privacy note no longer claims that nothing ever leaves the browser.
+ assert.match(html, /Nothing is sent to a server unless you use <b>AI edit<\/b>/);
+ assert.match(html, /never the PDF, its fonts, its metadata or its file ID/);
+});
