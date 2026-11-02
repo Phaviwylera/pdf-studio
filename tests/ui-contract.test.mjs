@@ -64,6 +64,12 @@ test('downloads expose a manual retry outside blocked preview frames', async () 
  assert.match(decrypt, /new URL\('\.\/vendor\/qpdf\/qpdf\.wasm', import\.meta\.url\)/);
 });
 
+test('a cell the user typed in keeps the column the export read for it', async () => {
+ const app = await read('../dist/app.mjs');
+ assert.match(app, /exportEdits\.set\(id,lined\.columnEdge!==undefined\?\{\.\.\.block,columnEdge:lined\.columnEdge\}:\{\.\.\.block,x:lined\.x\}\)/);
+ assert.match(app, /import \{ exportNativePdf, inspectSignatureProtection, strayColumnCells, columnAlignment, columnEdges, decimalAnchorFix, EXPORT_VERSION \} from '\.\/native-export\.mjs'/);
+});
+
 test('file identifier dialog restores the original /ID into exports', async () => {
  const html = await read('../dist/index.html');
  const app = await read('../dist/app.mjs');

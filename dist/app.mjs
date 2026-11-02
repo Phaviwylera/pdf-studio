@@ -413,8 +413,14 @@ async function exportPdf(event){
   const linedUp=aligned.size;
   const exportEdits=new Map(aligned);
   // The user's text, font and styling win; where a cell was put back on its
-  // column, only its anchor moves, and it is the cell they just typed in.
-  for(const [id,block] of edits)exportEdits.set(id,aligned.has(id)?{...block,x:aligned.get(id).x}:block);
+  // column, only its anchor moves, and it is the cell they just typed in. A value
+  // the column rule read keeps its column even when its text was edited, so the
+  // value they typed is drawn on the same edge as the rest of its column.
+  for(const [id,block] of edits){
+   const lined=aligned.get(id);
+   if(!lined){exportEdits.set(id,block);continue}
+   exportEdits.set(id,lined.columnEdge!==undefined?{...block,columnEdge:lined.columnEdge}:{...block,x:lined.x});
+  }
   const nativeBytes=await exportNativePdf({original,edits:exportEdits,getPage,fonts:loadedFonts,originalFonts,PDFLib,fontkit:window.fontkit,metadataRecord:sourceMetadata,uploadedMetadata,fileId,documentFonts:documentFontPlans(),headerSource:uploadedOriginal,onProgress:status});
   const checkedExport=await enforceFileId({bytes:nativeBytes,fileId,PDFLib});
   const bytes=checkedExport.bytes;
