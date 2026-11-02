@@ -6,11 +6,12 @@ import {applyFileId, sameFileId, fileIdFromDocument} from './file-id.mjs';
 import {readDocumentFont, documentFontEncoder} from './document-font.mjs';
 import {fontKey} from './font-inventory.mjs';
 import {parseAmount} from './statement-check.mjs';
+import {splitDirection, suffixWidthShare} from './bank-profile.mjs';
 const WS=c=>c===0||c===9||c===10||c===12||c===13||c===32;
 const DELIM=c=>WS(c)||'()<>[]{}/%'.includes(String.fromCharCode(c));
 // Which export engine wrote the bytes. The editor shows it, so a stale copy of
 // this module in an open tab is visible instead of being blamed on the document.
-export const EXPORT_VERSION=27;
+export const EXPORT_VERSION=28;
 const ascii=bytes=>{let s='';for(let i=0;i<bytes.length;i+=8192)s+=String.fromCharCode(...bytes.subarray(i,i+8192));return s};
 const bytes=s=>Uint8Array.from(s,c=>c.charCodeAt(0));
 const number=value=>{if(!Number.isFinite(value))throw new Error('Invalid PDF text coordinate.');return String(Math.round(value*1e7)/1e7)};
@@ -487,7 +488,7 @@ function decimalStart(block,segments){
 // it have to mostly sit on it, and nothing is moved further than a few points. An
 // ordinary page, a lone number in a page header, or a column with several equally
 // common edges is left exactly as the producer wrote it.
-export function columnAlignment(blocks,{minSupport=3,maxDrift=8,band=12,minMove=0.1}={}){
+export function columnAlignment(blocks,{minSupport=3,maxDrift=8,band=12,minMove=0.1,mode='right'}={}){
  const entries=[];
  (blocks||[]).forEach((block,index)=>{
   if(!block||!valueInColumn(block.text)||!(Number(block.width)>0))return;
@@ -498,7 +499,7 @@ export function columnAlignment(blocks,{minSupport=3,maxDrift=8,band=12,minMove=
  if(entries.length<minSupport+1)return [];
  const moves=[];
  for(const style of new Set(entries.map(entry=>entry.style))){
-  moves.push(...styleAlignment(entries.filter(entry=>entry.style===style),{minSupport,maxDrift,band,minMove}));
+  moves.push(...styleAlignment(entries.filter(entry=>entry.style===style),{minSupport,maxDrift,band,minMove,mode}));
  }
  return moves;
 }
@@ -510,18 +511,35 @@ function styleKey(block){
  const size=Number(block.size),colour=String(block.color||'');
  return `${Number.isFinite(size)?size.toFixed(2):''}|${colour}`;
 }
-function styleAlignment(entries,{minSupport,maxDrift,band,minMove}){
- const sorted=[...entries].sort((a,b)=>a.right-b.right);
+function styleAlignment(entries,{minSupport,maxDrift,band,minMove,mode='right'}){
+ // A direction written straight after the figure ("14.43CR") is not part of the
+ // amount: the column is aligned on the figure, so the suffix is taken out of the
+ // comparison. Its width is estimated from the cell's own width, which is only
+ // ever used to decide which edge owns the column — the value itself is placed by
+ // measuring the figure with the font that draws it.
+ const decimal=mode==='decimal';
+ for(const entry of entries){
+  const text=String(entry.block.text??'');
+  const suffix=decimal?splitDirection(text).suffix:'';
+  const share=suffix?suffixWidthShare(text):0;
+  // The share is an estimate, so the figure edge it gives can be off by the width
+  // of the suffix itself. That much extra room keeps a value the printer aligned
+  // by its run from being left out of its own column.
+  entry.slack=share?Math.min(14,Number(entry.block.width)*share):0;
+  entry.anchor=suffix?entry.right-entry.slack:entry.right;
+ }
+ const key=decimal?'anchor':'right';
+ const sorted=[...entries].sort((a,b)=>a[key]-b[key]);
  // Two values on the same edge sit within a rounding error of each other; the
  // printer's own off-by-a-character edges are whole points apart, so a tight
  // tolerance keeps this a test for one edge and not for a smear of values.
  const edges=[];
  for(const entry of sorted){
   const last=edges[edges.length-1];
-  if(last&&entry.right-last.lastRight<=0.3){last.entries.push(entry);last.lastRight=entry.right}
-  else edges.push({entries:[entry],lastRight:entry.right});
+  if(last&&entry[key]-last.lastRight<=0.3){last.entries.push(entry);last.lastRight=entry[key]}
+  else edges.push({entries:[entry],lastRight:entry[key]});
  }
- for(const edge of edges)edge.at=edge.entries.reduce((sum,entry)=>sum+entry.right,0)/edge.entries.length;
+ for(const edge of edges)edge.at=edge.entries.reduce((sum,entry)=>sum+entry[key],0)/edge.entries.length;
  // Edges a few points apart belong to the same column even though the printer drew
  // them apart; wider gaps are separate columns and are never mixed.
  const bands=[];
@@ -546,9 +564,9 @@ function styleAlignment(entries,{minSupport,maxDrift,band,minMove}){
   });
   if(!anchor)continue;
   for(const entry of entries){
-   const drift=entry.right-anchor.at;
-   if(Math.abs(drift)>maxDrift||Math.abs(drift)<=minMove)continue;
-   moves.push({block:entry.block,page:entry.page,edge:anchor.at,drift});
+   const drift=entry[key]-anchor.at;
+   if(Math.abs(drift)>maxDrift+entry.slack||Math.abs(drift)<=minMove)continue;
+   moves.push({block:entry.block,page:entry.page,edge:anchor.at,drift,numberEdge:decimal});
   }
  }
  return moves;
@@ -559,7 +577,17 @@ function placedStart(block,segments,original,column=true,columnEdge=null){
  // it. Measuring the width here rather than trusting the editor's estimate is what
  // puts the value exactly on the edge: the two widths can differ by a fraction of
  // a point, and on a column of money that fraction is the whole point.
- if(Number.isFinite(Number(block.columnEdge)))return Number(block.columnEdge)-width;
+ if(Number.isFinite(Number(block.columnEdge))){
+  // A bank that prints the direction straight after the figure ("14.43CR") means
+  // the figure is what stands on the column; the suffix hangs to its right. The
+  // number is measured on its own with the font that draws it, so the decimal
+  // point of a hundred, a thousand and a lakh all land in the same place.
+  if(block.columnNumberEdge&&segments.length===1){
+   const number=splitDirection(String(block.text??'')).number;
+   if(number&&number!==String(block.text??''))return Number(block.columnEdge)-textMetrics(segments[0].encoder,number,block).width;
+  }
+  return Number(block.columnEdge)-width;
+ }
  if(block.align==='decimal'){
   const start=decimalStart(block,segments);
   // A decimal-aligned run with no point in it has no anchor to honour, so it

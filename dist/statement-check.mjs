@@ -38,7 +38,7 @@ export function parseAmount(text) {
  // Direction: "12.00(Dr)" and "12.00 (Cr)" put it in brackets, "12.00 Dr" after a
  // space, and some banks run it straight into the figure as "12.00CR". All of them
  // mean the same thing; only the brackets are a printing style.
- let drcr = null, directionInParentheses = false;
+ let drcr = null, directionInParentheses = false, directionSpaced = false;
  let match = /\(\s*(dr|cr)\s*\)\s*$/i.exec(rest);
  if (match) {
   drcr = match[1].toUpperCase();
@@ -46,6 +46,7 @@ export function parseAmount(text) {
   rest = rest.slice(0, match.index).trim();
  } else if ((match = /(dr|cr)\.?$/i.exec(rest)) && /[\d)\s]/.test(rest[match.index - 1] ?? '')) {
   drcr = match[1].toUpperCase();
+  directionSpaced = /\s/.test(rest[match.index - 1] ?? '');
   rest = rest.slice(0, match.index).trim();
  }
  if (!rest) return null;
@@ -62,13 +63,16 @@ export function parseAmount(text) {
  if (digits.length > 13) return null;
  const decimals = (rest.split('.')[1] || '').length;
  const thousands = rest.includes(',');
+ // A statement that groups lakhs writes 2,86,410.00, not 286,410.00. A cell put
+ // back with the other grouping no longer matches the column it sits in.
+ const grouping = /^\d{1,2}(?:,\d{2})+,\d{3}(?:\.|$)/.test(rest.replace(/\s/g, '')) ? 'indian' : 'western';
  const body = rest.replace(/[\s]/g, '');
  const value = Number(body.replace(/,/g, ''));
  if (!Number.isFinite(value)) return null;
  const signed = drcr === 'DR' ? -Math.abs(value) : drcr === 'CR' ? Math.abs(value) : (negative ? -Math.abs(value) : value);
  return {
   value: signed, cents: toCents(signed),
-  drcr, directionInParentheses, currency, decimals, thousands, parentheses: negative, raw: text.trim(),
+  drcr, directionInParentheses, directionSpaced, currency, decimals, thousands, grouping, parentheses: negative, raw: text.trim(),
  };
 }
 
@@ -100,6 +104,14 @@ export function parseDate(text) {
  return {iso, year: numbers[0], month: numbers[1], day: numbers[2], raw: value};
 }
 
+/** Insert separators the way the sample grouped them: 100,000 or 1,00,000. */
+export function groupDigits(digits, style = 'western') {
+ const text = String(digits ?? '');
+ if (style !== 'indian' || text.length <= 3) return text.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+ const head = text.slice(0, -3).replace(/\B(?=(\d{2})+(?!\d))/g, ',');
+ return `${head},${text.slice(-3)}`;
+}
+
 /**
  * Write a value in the same shape as the cell it replaces: same currency prefix,
  * same thousands separator, same decimals, same Dr/Cr suffix or parentheses.
@@ -111,7 +123,7 @@ export function formatAmountLike(sample, value) {
  const currency = parsed?.currency ?? '';
  const absolute = Math.abs(Number(value) || 0).toFixed(decimals);
  let [whole, fraction] = absolute.split('.');
- if (thousands) whole = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+ if (thousands) whole = groupDigits(whole, parsed?.grouping === 'indian' ? 'indian' : 'western');
  const body = fraction ? `${whole}.${fraction}` : whole;
  const negative = (Number(value) || 0) < 0;
  const gap = /^[A-Za-z]+$/.test(currency) ? ' ' : '';
@@ -123,8 +135,10 @@ export function formatAmountLike(sample, value) {
   const written = /(?:^|[\s)])(dr|cr)\.?$/i.exec((parsed?.raw || '').replace(/\(\s*(dr|cr)\s*\)\s*$/i, ' $1'))?.[1] || suffix;
   const style = written === written.toUpperCase() ? {dr: 'DR', cr: 'CR'} : {dr: 'Dr', cr: 'Cr'};
   const direction = negative ? style.dr : style.cr;
-  // "12.00(Dr)" and "12.00 Dr" are both common; match the cell being replaced.
-  return parsed?.directionInParentheses ? `${prefix}${body}(${direction})` : `${prefix}${body} ${direction}`;
+  // "12.00(Dr)", "12.00 Dr" and "12.00CR" are all common; match the cell being
+  // replaced, down to the space before the direction.
+  if (parsed?.directionInParentheses) return `${prefix}${body}(${direction})`;
+  return parsed?.directionSpaced ? `${prefix}${body} ${direction}` : `${prefix}${body}${direction}`;
  }
  if (negative && parsed?.parentheses) return `${prefix}(${body})`;
  return `${prefix}${negative ? `-${body}` : body}`;

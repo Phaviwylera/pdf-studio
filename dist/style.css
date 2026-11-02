@@ -42,3 +42,7 @@ dialog{width:min(640px,92vw);max-height:85vh;overflow:auto;border:1px solid #dce
 #export-feedback{white-space:pre-wrap}
 
 #textpaint{align-self:center;color:#2459e0;font-size:.75rem;line-height:1.4}
+
+/* Statement layout: kept with the open document, shown beside the header actions. */
+.bankprofile{display:flex;align-items:center;gap:8px;font-size:.875rem;color:#586a85;white-space:nowrap}
+.bankprofile select{width:auto;padding:6px 8px;font-size:.875rem}

@@ -836,3 +836,100 @@ test('an export writes a character-count column onto one right edge', async () =
   assert.ok(placements.some(place => Math.abs(place[4] - x) < 0.01), `${text} stays where it was`);
  }
 });
+
+// A State Bank page: the figure and its direction are one run, and the printer
+// right-aligns the run. The column the statement keeps is the figure's, so a
+// value carrying a suffix has to be placed by its figure, not by the run.
+test('a direction run after a figure does not move the figure off its column', async () => {
+ const size = 9;
+ const pdf = await L.PDFDocument.create();
+ const font = await pdf.embedFont(L.StandardFonts.Helvetica);
+ const page = pdf.addPage([300, 200]);
+ const plain = ['318.66', '308.66', '295.66'];
+ const rows = [
+  ...plain.map((text, index) => ({text, x: 260 - font.widthOfTextAtSize(text, size), y: 170 - index * 20})),
+  // The figure ends 6pt short of the column; the run it belongs to ends 13pt
+  // past it, because CR is drawn on after the figure.
+  {text: '4,281.66CR', x: 254 - font.widthOfTextAtSize('4,281.66', size), y: 110},
+ ];
+ rows.forEach(row => page.drawText(row.text, {x: row.x, y: row.y, size, font}));
+ page.drawText(ALPHABET, {x: 20, y: 20, size, font});
+ const bytes = await pdf.save();
+ const blocks = rows.map((row, index) => ({
+  id: `1:${index}`, page: 1, text: row.text, x: row.x, y: viewY(row.y), size,
+  width: font.widthOfTextAtSize(row.text, size), height: size, fontName: 'Helvetica', fontId: 'g_d0_f1',
+  font: 'original', bold: false, italic: false, underline: false, spacing: 0, wordSpacing: 0,
+  lineheight: 1.2, align: 'left', scaleX: 1, textMode: 0, strokeWidth: 1, color: '#000000',
+  strokeColor: '#000000', ops: [index], canEdit: true,
+ }));
+ const ops = [...rows.map((row, index) => op(index, row.text)), op(rows.length, ALPHABET)];
+ const content = loaded => {
+  const node = loaded.getPage(0).node.get(name('Contents'));
+  const parts = node instanceof L.PDFArray ? node.asArray().map(ref => loaded.context.lookup(ref)) : [loaded.context.lookup(node)];
+  return parts.map(part => part instanceof L.PDFRawStream
+   ? latin1(L.decodePDFRawStream(part).decode())
+   : latin1(part.getUnencodedContent?.() ?? part.getUnencodedContents())).join('\n');
+ };
+ const run = async mode => {
+  const moves = columnAlignment(blocks, {mode});
+  const edits = new Map(moves.map(move => [move.block.id,
+   {...move.block, columnEdge: move.edge, columnNumberEdge: move.numberEdge === true}]));
+  const out = await exportNativePdf({original: bytes, edits, PDFLib: L,
+   getPage: async () => ({vp: {transform: [1, 0, 0, -1, 0, 200]}, info: {ops}, blocks})});
+  return {moves, placements: matrices(content(await L.PDFDocument.load(out.slice(), {updateMetadata: false})))};
+ };
+
+ const decimal = await run('decimal');
+ assert.equal(decimal.moves.length, 1, 'only the suffixed value is off the column');
+ assert.equal(decimal.moves[0].numberEdge, true);
+ // The writer measures the figure with the glyph widths of the run it replaces.
+ const measured = text => [...text].reduce((total, char) => total + (WIDTHS[char] ?? 600) * size / 1000, 0);
+ // The figure ends on the column; the direction hangs to its right.
+ const figureX = 260 - measured('4,281.66');
+ assert.ok(decimal.placements.some(place => Math.abs(place[4] - figureX) < 0.01),
+  `the figure starts where the column puts it: ${figureX}`);
+
+ const right = await run('right');
+ assert.equal(right.moves.length, 1);
+ assert.equal(right.moves[0].numberEdge, false);
+ // Read as a whole run the same cell is dragged 13pt past the column.
+ const runX = 260 - measured('4,281.66CR');
+ assert.ok(right.placements.some(place => Math.abs(place[4] - runX) < 0.01),
+  `the run is what gets placed: ${runX}`);
+ assert.ok(figureX - runX > 5, 'the two rules put the figure in different places');
+});
+
+// Text the user adds is drawn in the page's own font by default: the export
+// points at the font dictionary the page already has instead of embedding a
+// second copy of the typeface or a substitute.
+test('added text is drawn with the page own font, not a new copy of it', async () => {
+ const original = await statementPage('15.00');
+ const fixture = {...original, text: '15.00'};
+ const blocks = [block(fixture)];
+ const added = {
+  id: '1:new', page: 1, text: '20.00', x: 180, y: viewY(120), size: fixture.size,
+  width: fixture.measure('20.00'), height: fixture.size, fontName: 'Helvetica', fontId: 'g_d0_f1',
+  font: 'original', bold: false, italic: false, underline: false, spacing: 0, wordSpacing: 0,
+  lineheight: 1.2, align: 'left', scaleX: 1, textMode: 0, strokeWidth: 1, color: '#000000',
+  strokeColor: '#000000', ops: [], canEdit: true, added: true,
+ };
+ const bytes = await exportNativePdf({
+  original: original.bytes, edits: new Map([[added.id, added]]), PDFLib: L,
+  getPage: pageData(fixture, blocks),
+ });
+ const pdf = await L.PDFDocument.load(bytes.slice(), {updateMetadata: false});
+ const stream = pdf.context.lookup(pdf.getPage(0).node.get(name('Contents')));
+ const content = latin1(L.decodePDFRawStream(stream).decode());
+ // Glyph codes, so the value appears as hex: 20.00 -> 32302E3030.
+ assert.match(content, /32302E3030/, 'the typed value is written');
+ // The run is drawn in the same typeface the page is printed in, and nothing
+ // extra is embedded to do it.
+ // The font in force when the value is drawn.
+ const names = [...content.slice(0, content.indexOf('32302E3030')).matchAll(/\/([A-Za-z0-9.+-]+)\s+[\d.]+\s+Tf/g)];
+ assert.ok(names.length, 'the drawn text names a font');
+ const resourceName = names.at(-1)[1];
+ const fonts = pdf.context.lookup(pdf.getPage(0).node.Resources()).lookup(L.PDFName.of('Font'), L.PDFDict);
+ const font = pdf.context.lookup(fonts.get(L.PDFName.of(resourceName)));
+ assert.match(font.get(L.PDFName.of('BaseFont')).toString(), /Helvetica/, 'the page typeface, not a substitute');
+ assert.equal(font.get(L.PDFName.of('FontDescriptor')), undefined, 'the standard program is not embedded again');
+});

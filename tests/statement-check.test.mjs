@@ -58,6 +58,25 @@ test('a corrected balance is written in the shape of the cell it replaces', () =
  assert.equal(formatAmountLike('451.00', 451), '451.00');
 });
 
+test('a corrected balance keeps the grouping and the direction style of its cell', () => {
+ // A statement that groups lakhs keeps grouping lakhs: 1,00,234.50, not 100,234.50.
+ assert.equal(formatAmountLike('2,86,410.00', 286410), '2,86,410.00');
+ assert.equal(formatAmountLike('1,00,234.14', 100234.5), '1,00,234.50');
+ assert.equal(formatAmountLike('98,76,543.21', 9876543.21), '98,76,543.21');
+ assert.equal(formatAmountLike('1,234.56', 1234.56), '1,234.56', 'three-digit grouping stays');
+ assert.equal(parseAmount('2,86,410.00').grouping, 'indian');
+ assert.equal(parseAmount('286,410.00').grouping, 'western');
+ // A direction written straight after the figure is written back the same way.
+ assert.equal(formatAmountLike('14.43CR', 15.43), '15.43CR');
+ assert.equal(formatAmountLike('14.43CR', -15.43), '15.43DR');
+ assert.equal(formatAmountLike('17.66 Cr', -18.5), '18.50 Dr');
+ assert.equal(formatAmountLike('100.00(Dr)', -88.5), '88.50(Dr)', 'the direction follows the value');
+ assert.equal(formatAmountLike('100.00(Dr)', 88.5), '88.50(Cr)');
+ assert.equal(parseAmount('14.43CR').value, 14.43);
+ assert.equal(parseAmount('14.43CR').directionSpaced, false);
+ assert.equal(parseAmount('17.66 CR').directionSpaced, true);
+});
+
 test('rows are grouped by baseline and split into date, narration, amount and balance', () => {
  const row = {
   y: 640,
