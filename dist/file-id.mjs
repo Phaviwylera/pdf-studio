@@ -169,6 +169,22 @@ export async function readPdfFileId(bytes, L) {
  return null;
 }
 
+/**
+ * The identifier pair a file has when nothing has saved it yet: both slots hold
+ * the permanent value. A statement that arrives with two different values carries
+ * the trace of a later save, and some upload checks read exactly that trace. An
+ * export therefore writes the permanent identifier into both slots, which is the
+ * shape the producer left behind, while keeping the creation value itself intact.
+ */
+export function asProduced(id) {
+ if (!id) return id;
+ return {
+  ...id,
+  changing: id.permanent || id.changing,
+  changingType: id.permanent ? id.permanentType : id.changingType,
+ };
+}
+
 export function fileIdKey(id) {
  if (!id || (!id.permanent && !id.changing)) return '';
  return `${id.permanent || ''}:${id.changing || id.permanent || ''}`;

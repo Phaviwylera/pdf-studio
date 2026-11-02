@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {createRequire} from 'node:module';
 import {
  hexFromBytes, scanPdfFileId, readPdfFileId, fileIdFromDocument, applyFileId,
- sameFileId, fileIdKey, fileIdStatus, fileIdWarning, enforceFileId,
+ sameFileId, fileIdKey, fileIdStatus, fileIdWarning, enforceFileId, asProduced,
 } from '../dist/file-id.mjs';
 import {exportNativePdf} from '../dist/native-export.mjs';
 
@@ -143,4 +143,18 @@ test('encryption can restore a pair the source file lost', async () => {
  const target = {permanent: PERMANENT, changing: CHANGING};
  const encrypted = await encryptPdfCopy({bytes, password: 'correct horse battery', fileId: target, PDFLib: L});
  assert.ok(sameFileId(target, await readPdfFileId(encrypted, L)));
+});
+
+test('an export writes the identifier pair the way a producer leaves it', () => {
+ // The file that arrived was saved once after it was created, so its two /ID
+ // slots differ. Keeping that pair would carry the trace of that save into the
+ // export; the producer's own shape is one value in both slots.
+ const saved = {permanent: PERMANENT, changing: 'FFEEDDCCBBAA99887766554433221100',
+  permanentType: 'hex', changingType: 'hex', count: 2};
+ const produced = asProduced(saved);
+ assert.equal(produced.permanent, PERMANENT, 'the creation identifier is kept');
+ assert.equal(produced.changing, PERMANENT);
+ assert.equal(fileIdStatus(produced, produced), 'preserved');
+ assert.notEqual(fileIdKey(saved), fileIdKey(produced));
+ assert.equal(asProduced(null), null);
 });

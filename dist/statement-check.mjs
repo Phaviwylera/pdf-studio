@@ -36,14 +36,15 @@ export function parseAmount(text) {
  let rest = text.replace(/\u00a0/g, ' ').trim();
  if (!rest || rest.length > 48) return null;
  // Direction: "12.00(Dr)" and "12.00 (Cr)" put it in brackets, "12.00 Dr" after a
- // space. Both mean the same thing; the brackets are how some banks print it.
+ // space, and some banks run it straight into the figure as "12.00CR". All of them
+ // mean the same thing; only the brackets are a printing style.
  let drcr = null, directionInParentheses = false;
  let match = /\(\s*(dr|cr)\s*\)\s*$/i.exec(rest);
  if (match) {
   drcr = match[1].toUpperCase();
   directionInParentheses = true;
   rest = rest.slice(0, match.index).trim();
- } else if ((match = /(?:^|[\s)])(dr|cr)\.?$/i.exec(rest))) {
+ } else if ((match = /(dr|cr)\.?$/i.exec(rest)) && /[\d)\s]/.test(rest[match.index - 1] ?? '')) {
   drcr = match[1].toUpperCase();
   rest = rest.slice(0, match.index).trim();
  }

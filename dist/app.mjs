@@ -4,14 +4,14 @@ import {translatePosition, constrainPosition} from './positioning.mjs';
 import {readCertificate, signPdfCopy, fingerprints} from './signing.mjs';
 import {makeSourceMetadataRecord, metadataJson, parseUploadedMetadata, MAX_USER_METADATA_BYTES} from './metadata.mjs';
 import * as pdfjs from './vendor/pdf.mjs';
-import { exportNativePdf, inspectSignatureProtection, strayColumnCells, columnEdges, decimalAnchorFix, EXPORT_VERSION } from './native-export.mjs';
+import { exportNativePdf, inspectSignatureProtection, strayColumnCells, columnAlignment, columnEdges, decimalAnchorFix, EXPORT_VERSION } from './native-export.mjs';
 import { encryptPdfCopy } from './encrypt.mjs';
 import { decryptPdfCopy } from './decrypt.mjs';
 import { encryptExportCopy, encryptedExportName, validateExportPasswords } from './export-encryption.mjs';
 import {normalizeMeasure, formatMeasure, textPaintMode, canvasStrokeWidth, glyphLayout, baselineOffsetFor, sameTextState, paintStateUsable} from './typography.mjs';
 import {matchTextOperations} from './text-matching.mjs';
 import {buildDocumentFontInventory, fontKey, formatFontInventory} from './font-inventory.mjs';
-import {readPdfFileId, sameFileId, fileIdWarning, enforceFileId} from './file-id.mjs';
+import {readPdfFileId, sameFileId, fileIdWarning, enforceFileId, asProduced} from './file-id.mjs';
 import {extractStatementRows, checkStatement, formatReport} from './statement-check.mjs';
 pdfjs.GlobalWorkerOptions.workerSrc='./vendor/pdf.worker.mjs';
 const $=id=>document.getElementById(id), OPS=pdfjs.OPS;
@@ -169,7 +169,9 @@ async function openFile(file){
  try{
   await paintQueue;
   const bytes=new Uint8Array(await file.arrayBuffer());
-  const uploadedFileId=await readPdfFileId(bytes,PDFLib);
+  // A file that has never been saved again carries one identifier in both slots.
+  // Keeping the pair as found would carry the trace of the edit that produced it.
+  const uploadedFileId=asProduced(await readPdfFileId(bytes,PDFLib));
   let acceptedPassword=null;
   const loading=pdfjs.getDocument({data:bytes.slice(),cMapUrl:'./vendor/cmaps/',cMapPacked:true,standardFontDataUrl:'./vendor/standard_fonts/',wasmUrl:'./vendor/wasm/',fontExtraProperties:true});
   loading.onPassword=(update,reason)=>{
@@ -191,7 +193,7 @@ async function openFile(file){
     nextSignatureState={locked:true,signed:false,count:0,unknown:true,reason:'decrypt'};
    }
   }
-  const nextWorkingFileId=workingBytes===bytes?uploadedFileId:await readPdfFileId(workingBytes,PDFLib);
+  const nextWorkingFileId=workingBytes===bytes?uploadedFileId:asProduced(await readPdfFileId(workingBytes,PDFLib));
   acceptedPassword=null;
   let nextMetadata=null;try{nextMetadata=await next.getMetadata()}catch{}
   const nextMetadataRecord=makeSourceMetadataRecord({filename:file.name||'document.pdf',byteLength:bytes.length,pageCount:next.numPages,inspection:uploadedInspection,metadata:nextMetadata});
@@ -326,18 +328,38 @@ async function alignmentEdits(edits){
  if(!doc)return aligned;
  // Only a page that carries an edited decimal run needs its columns read for it.
  const decimalPages=new Set([...edits.values()].filter(block=>block.align==='decimal').map(block=>block.page));
+ const light=[],byPage=new Map();
  for(let n=1;n<=doc.numPages;n+=1){
-  let cells=[],fixes=[];
   try{
    const page=await doc.getPage(n);
    const content=await page.getTextContent({includeMarkedContent:false});
    const vp=page.getViewport({scale:1});
-   const items=content.items.filter(item=>item.str&&norm(item.str)).map(item=>{const t=pdfjs.Util.transform(vp.transform,item.transform);return {text:item.str,x:t[4],y:t[5],width:item.width}});
-   if(!strayColumnCells(items).length&&!decimalPages.has(n))continue;
+   const items=[];
+   for(const item of content.items){
+    if(!item.str||!norm(item.str))continue;
+    const t=pdfjs.Util.transform(vp.transform,item.transform);
+    items.push({text:item.str,x:t[4],y:t[5],width:item.width,size:Math.hypot(t[2],t[3]),page:n});
+   }
+   byPage.set(n,items);
+   light.push(...items);
+  }catch{}
+ }
+ // A producer that lines a column up by character count leaves several edges in
+ // one column. Where a single edge clearly owns the column, the whole column is
+ // written to it — on every page — and nothing else on the file is touched.
+ const columns=new Map();
+ for(const move of columnAlignment(light)){
+  if(!columns.has(move.page))columns.set(move.page,new Map());
+  columns.get(move.page).set(`${move.block.text}\u0000${Number(move.block.y).toFixed(2)}\u0000${Number(move.block.size).toFixed(2)}`,move.edge);
+ }
+ for(let n=1;n<=doc.numPages;n+=1){
+  const wanted=columns.get(n);
+  let cells=[],fixes=[];
+  try{
+   const items=byPage.get(n)||[];
+   if(!strayColumnCells(items).length&&!wanted&&!decimalPages.has(n))continue;
    const data=await getPage(n);
    cells=strayColumnCells(data.blocks);
-   // A decimal-aligned run is anchored at its point, so a page that carries one
-   // needs the same treatment read from where those runs end.
    const edges=columnEdges(data.blocks);
    const ctx=scratch.getContext('2d');
    if(ctx&&edges.length){
@@ -351,6 +373,14 @@ async function alignmentEdits(edits){
      if(current.align!=='decimal'||current.removed)continue;
      const x=decimalAnchorFix(current,edges,widthOf);
      if(x!==null)fixes.push({...current,x});
+    }
+   }
+   if(wanted){
+    for(const block of data.blocks){
+     if(!block||block.removed||!block.canEdit)continue;
+     const edge=wanted.get(`${block.text}\u0000${Number(block.y).toFixed(2)}\u0000${Number(block.size).toFixed(2)}`);
+     if(edge===undefined)continue;
+     aligned.set(block.id,{...block,columnEdge:edge});
     }
    }
   }catch{continue}

@@ -249,6 +249,33 @@ test('amounts written as "12.00(Dr)" are read, and ids are not money', () => {
   assert.equal(parseAmount(notAmount), null, `${notAmount} is not an amount`);
 });
 
+test('a direction run straight into the figure is read as that direction', () => {
+ // One bank prints "14.43CR" with no space and no brackets. Read as text rather
+ // than as money, the row's balance check has nothing to add up and the row is
+ // reported as a mismatch it is not.
+ assert.equal(parseAmount('14.43CR').cents, 1443);
+ assert.equal(parseAmount('17.66CR').cents, 1766);
+ assert.equal(parseAmount('1,00,000.00DR').cents, -10000000);
+ assert.equal(parseAmount('2,86,410.00CR').cents, 28641000);
+ assert.equal(parseAmount('12.00 Dr').cents, -1200, 'a spaced direction still reads');
+ assert.equal(parseAmount('100.00(Dr)').cents, -10000, 'a bracketed direction still reads');
+ // A word that only ends in those letters is not a direction.
+ for (const notAmount of ['ACR', 'DECR', 'SCDR']) assert.equal(parseAmount(notAmount), null, `${notAmount} is not an amount`);
+});
+
+test('a brought-forward row printed as 14.43CR adds up', () => {
+ const {rows} = extractStatementRows([statementPage([
+  {date: '01-04-2026', narration: 'Brought Forward', balance: '17.66CR'},
+  {date: '02-04-2026', narration: 'Opening', amount: '2,86,410.00CR', balance: '14.43CR'},
+ ])]);
+ const report = checkStatement(rows);
+ // The cleared row: 17.66 + 2,86,410.00 is 2,86,427.66, so this pair is a real
+ // mismatch — what matters is that both figures were read at all.
+ assert.ok(rows.some(row => row.balance && Math.abs(row.balance.cents) === 1443), 'the closing balance is read');
+ assert.ok(rows.some(row => row.amount && Math.abs(row.amount.cents) === 28641000), 'the amount is read');
+ assert.ok(!report.empty);
+});
+
 test('a fix keeps the bracketed direction style of the cell it replaces', () => {
  assert.equal(formatAmountLike('394.57(Cr)', 402.57), '402.57(Cr)');
  assert.equal(formatAmountLike('100.00(Dr)', 88.5), '88.50(Cr)');
