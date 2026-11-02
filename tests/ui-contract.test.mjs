@@ -66,7 +66,7 @@ test('downloads expose a manual retry outside blocked preview frames', async () 
 
 test('a cell the user typed in keeps the column the export read for it', async () => {
  const app = await read('../dist/app.mjs');
- assert.match(app, /exportEdits\.set\(id,lined\.columnEdge!==undefined\?\{\.\.\.block,columnEdge:lined\.columnEdge\}:\{\.\.\.block,x:lined\.x\}\)/);
+ assert.match(app, /exportEdits\.set\(id,lined\.columnEdge!==undefined\?\{\.\.\.block,columnEdge:lined\.columnEdge,columnNumberEdge:lined\.columnNumberEdge===true\}:\{\.\.\.block,x:lined\.x\}\)/);
  assert.match(app, /import \{ exportNativePdf, inspectSignatureProtection, strayColumnCells, columnAlignment, columnEdges, decimalAnchorFix, EXPORT_VERSION \} from '\.\/native-export\.mjs'/);
 });
 
@@ -148,4 +148,39 @@ test('the encryption algorithm can be chosen for an export and for the standalon
  assert.match(app, /algorithm:\$\('encrypt-algorithm'\)\.value/);
  // RC4 needs no Web Crypto, so a plain http page can still produce one.
  assert.match(await read('../dist/encrypt.mjs'), /RC4 128-bit works without it/);
+});
+
+test('the statement layout is chosen per document and never carried to the next file', async () => {
+ const html = await read('../dist/index.html');
+ const app = await read('../dist/app.mjs');
+ // The control sits with the editing controls and starts on the automatic choice.
+ assert.match(html, /<select id="profile" disabled>/);
+ assert.match(html, /id="layout"/);
+ assert.match(app, /for\(const option of profileOptions\(\)\)\$\('profile'\)\.append/);
+ assert.match(app, /let profileChoice='auto',profileDetected='generic'/);
+ // Opening a file resets the choice before the new document is read.
+ const open = app.slice(app.indexOf('await loadDocumentFonts();'), app.indexOf('for(let i=1;i<=doc.numPages;i++){const b=document.createElement'));
+ assert.match(open, /profileChoice='auto'/);
+ assert.match(open, /profileDetected='generic'/);
+ assert.match(open, /\$\('profile'\)\.value='auto'/);
+ assert.match(open, /await detectProfile\(\)/);
+ // The layout in force is what the export aligns with, and it is named in the footer.
+ assert.match(app, /const settings=currentProfile\(\)/);
+ assert.match(app, /settings\.columnPass\?columnAlignment\(light,\{\.\.\.settings\.alignment,mode:settings\.align\}\):\[\]/);
+ assert.match(app, /function syncProfileLabel\(\)\{\$\('layout'\)\.textContent=doc\?profileStatus\(\):''\}/);
+ assert.match(app, /\$\('profile'\)\.onchange=/);
+ assert.match(app, /detectBankProfile/);
+});
+
+test('new text is written with the page own font and can be set back to it', async () => {
+ const app = await read('../dist/app.mjs');
+ assert.match(app, /function pageFontFor\(n\)/);
+ // Added text defaults to the page program, not to a substitute family.
+ const add = app.slice(app.indexOf('async function add()'), app.indexOf('function undo()'));
+ assert.match(add, /pageFontFor\(n\)/);
+ assert.match(add, /font:pageFont\?'original':docFont\?\.family\|\|'Arial'/);
+ assert.match(add, /fontId:pageFont\?\.fontId/);
+ // The choice is offered in the font list for added text too.
+ assert.match(app, /b\.added&&b\.fontId&&originalRecord\(b\)/);
+ assert.match(app, /Original PDF font/);
 });
