@@ -73,8 +73,10 @@ test('file identifier dialog restores the original /ID into exports', async () =
  assert.match(html, /id="fileid-file" type="file" accept="application\/pdf,\.pdf"/);
  assert.match(html, /id="fileid-status" role="status"/);
  assert.match(html, /id="fileid-clear" disabled/);
- assert.match(app, /import \{readPdfFileId, sameFileId, fileIdWarning, enforceFileId\} from '\.\/file-id\.mjs'/);
- assert.match(app, /const uploadedFileId=await readPdfFileId\(bytes,PDFLib\)/);
+ assert.match(app, /import \{readPdfFileId, sameFileId, fileIdWarning, enforceFileId, asProduced\} from '\.\/file-id\.mjs'/);
+ // The captured pair is written the way a producer leaves it: one identifier in
+ // both slots, so the export does not advertise a later save.
+ assert.match(app, /const uploadedFileId=asProduced\(await readPdfFileId\(bytes,PDFLib\)\)/);
  assert.match(app, /sourceFileId=uploadedFileId;workingFileId=nextWorkingFileId/);
  assert.match(app, /function activeFileId\(\)\{return restoreFileId\|\|sourceFileId\|\|null\}/);
  assert.match(app, /async function selectFileIdSource\(file\)/);

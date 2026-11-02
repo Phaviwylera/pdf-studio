@@ -10,7 +10,7 @@ const WS=c=>c===0||c===9||c===10||c===12||c===13||c===32;
 const DELIM=c=>WS(c)||'()<>[]{}/%'.includes(String.fromCharCode(c));
 // Which export engine wrote the bytes. The editor shows it, so a stale copy of
 // this module in an open tab is visible instead of being blamed on the document.
-export const EXPORT_VERSION=26;
+export const EXPORT_VERSION=27;
 const ascii=bytes=>{let s='';for(let i=0;i<bytes.length;i+=8192)s+=String.fromCharCode(...bytes.subarray(i,i+8192));return s};
 const bytes=s=>Uint8Array.from(s,c=>c.charCodeAt(0));
 const number=value=>{if(!Number.isFinite(value))throw new Error('Invalid PDF text coordinate.');return String(Math.round(value*1e7)/1e7)};
@@ -406,6 +406,13 @@ function columnFor(right,y,edges){
 function columnEdgeFor(block,original,edges){
  if(!original||reallyMoved(block,original))return null;
  if(!valueInColumn(block.text))return null;
+ // An edge chosen for the whole column wins over the nearest cluster: the column
+ // was read across the page set, and this value may be one of the few the printer
+ // drew off it.
+ if(Number.isFinite(Number(block.columnEdge))){
+  const current=Number(original.x)+Number(original.width);
+  return Math.abs(Number(block.columnEdge)-current)>0.01?Number(block.columnEdge):null;
+ }
  const chosen=columnFor(Number(original.x)+Number(original.width),Number(block.y),edges);
  if(!chosen||Math.abs(chosen.edge-(Number(original.x)+Number(original.width)))<=1)return null;
  return chosen.edge;
@@ -468,8 +475,91 @@ function decimalStart(block,segments){
  }
  return block.x-width-(index>0?gap:0);
 }
+// Some statement producers right-align money with a fixed-width metric instead of
+// the font's own advances, so each value length ends on its own edge: on one page
+// the five-character amounts end at 377.5, the six-character ones at 379.7 and the
+// four-character ones at 375.3. Nothing was edited, but the column visibly does not
+// line up, and it reads as hand-placed text.
+//
+// Where one edge clearly owns a column, the whole column is written to it — on every
+// page of the document, so the column does not wander from page to page. The rule is
+// deliberately timid: the edge needs real support on a single page, the values around
+// it have to mostly sit on it, and nothing is moved further than a few points. An
+// ordinary page, a lone number in a page header, or a column with several equally
+// common edges is left exactly as the producer wrote it.
+export function columnAlignment(blocks,{minSupport=3,maxDrift=8,band=12,minMove=0.1}={}){
+ const entries=[];
+ (blocks||[]).forEach((block,index)=>{
+  if(!block||!valueInColumn(block.text)||!(Number(block.width)>0))return;
+  const right=Number(block.x)+Number(block.width);
+  if(!Number.isFinite(right))return;
+  entries.push({block,index,page:Number(block.page)||0,right,style:styleKey(block)});
+ });
+ if(entries.length<minSupport+1)return [];
+ const moves=[];
+ for(const style of new Set(entries.map(entry=>entry.style))){
+  moves.push(...styleAlignment(entries.filter(entry=>entry.style===style),{minSupport,maxDrift,band,minMove}));
+ }
+ return moves;
+}
+// A column is one size and one colour of text. A statement prints its own page
+// furniture in a smaller size — often white, over a coloured band — and those
+// numbers sit within a few points of the last money column, so they must never be
+// mistaken for its values.
+function styleKey(block){
+ const size=Number(block.size),colour=String(block.color||'');
+ return `${Number.isFinite(size)?size.toFixed(2):''}|${colour}`;
+}
+function styleAlignment(entries,{minSupport,maxDrift,band,minMove}){
+ const sorted=[...entries].sort((a,b)=>a.right-b.right);
+ // Two values on the same edge sit within a rounding error of each other; the
+ // printer's own off-by-a-character edges are whole points apart, so a tight
+ // tolerance keeps this a test for one edge and not for a smear of values.
+ const edges=[];
+ for(const entry of sorted){
+  const last=edges[edges.length-1];
+  if(last&&entry.right-last.lastRight<=0.3){last.entries.push(entry);last.lastRight=entry.right}
+  else edges.push({entries:[entry],lastRight:entry.right});
+ }
+ for(const edge of edges)edge.at=edge.entries.reduce((sum,entry)=>sum+entry.right,0)/edge.entries.length;
+ // Edges a few points apart belong to the same column even though the printer drew
+ // them apart; wider gaps are separate columns and are never mixed.
+ const bands=[];
+ for(const edge of edges.sort((a,b)=>a.at-b.at)){
+  const last=bands[bands.length-1];
+  if(last&&edge.at-last.lastAt<=band){last.edges.push(edge);last.lastAt=edge.at}
+  else bands.push({edges:[edge],lastAt:edge.at});
+ }
+ const pageCount=(edge,page)=>edge.entries.filter(entry=>entry.page===page).length;
+ const moves=[];
+ for(const group of bands){
+  const members=group.edges.reduce((n,edge)=>n+edge.entries.length,0);
+  // Three values on one edge plus at least one off it: below that there is no
+  // column to straighten, only a few numbers that happen to be nearby.
+  if(members<minSupport+1)continue;
+  const ranked=[...group.edges].sort((a,b)=>b.entries.length-a.entries.length);
+  // A page number in every header is one value on every page, not a column: the
+  // edge has to own several values on at least one page before it can claim one.
+  const anchor=ranked.find(edge=>{
+   const pages=new Set(edge.entries.map(entry=>entry.page));
+   return Math.max(...[...pages].map(page=>pageCount(edge,page)))>=minSupport;
+  });
+  if(!anchor)continue;
+  for(const entry of entries){
+   const drift=entry.right-anchor.at;
+   if(Math.abs(drift)>maxDrift||Math.abs(drift)<=minMove)continue;
+   moves.push({block:entry.block,page:entry.page,edge:anchor.at,drift});
+  }
+ }
+ return moves;
+}
 function placedStart(block,segments,original,column=true,columnEdge=null){
  const width=segments.reduce((total,segment)=>total+textMetrics(segment.encoder,segment.text,block).width,0);
+ // A run the export has decided to line up carries the column's right edge with
+ // it. Measuring the width here rather than trusting the editor's estimate is what
+ // puts the value exactly on the edge: the two widths can differ by a fraction of
+ // a point, and on a column of money that fraction is the whole point.
+ if(Number.isFinite(Number(block.columnEdge)))return Number(block.columnEdge)-width;
  if(block.align==='decimal'){
   const start=decimalStart(block,segments);
   // A decimal-aligned run with no point in it has no anchor to honour, so it

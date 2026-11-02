@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createRequire} from 'node:module';
-import {exportNativePdf, documentHexEncoder, strayColumnCells, alignedStart, columnEdges, decimalAnchorFix} from '../dist/native-export.mjs';
+import {exportNativePdf, documentHexEncoder, strayColumnCells, alignedStart, columnEdges, columnAlignment, decimalAnchorFix} from '../dist/native-export.mjs';
 import {alignHeader} from '../dist/header-marker.mjs';
 
 const require = createRequire(import.meta.url);
@@ -720,4 +720,119 @@ test('a decimal run that already ends on its column is left where it is', async 
  const crowded = [...blocks, ...Array.from({length: 7}, (_, rest) => ({...own,
   id: `1:extra:${rest}`, y: 300 + rest * 12, ops: []}))];
  assert.equal(decimalAnchorFix(own, columnEdges(crowded), value => fixture.width(value)), null);
+});
+
+// A producer that measures a digit as a fixed 2.2pt and right-aligns with that
+// metric leaves every value length on its own edge. These fixtures copy that
+// shape: one column, four value lengths, one edge per length.
+const CHAR_WIDTH = 2.2;
+
+function columnValues(rights, {page = 1, size = 9, x = 300, height = 20} = {}) {
+ return rights.map((right, index) => ({
+  id: `${page}:${index}`, page, text: right.text, x: x - right.text.length * CHAR_WIDTH,
+  y: height * (index + 1), width: right.width, size, color: '#000000',
+ }));
+}
+
+function alignedColumn() {
+ // Five-character values own the column; a short and a long value are drawn off
+ // it, exactly as the printer left them.
+ const values = ['15.00', '10.00', '13.00', '7.00', '100.00', '1,475.00'];
+ const widths = {'15.00': 20, '10.00': 20, '13.00': 20, '7.00': 15.6, '100.00': 24.4, '1,475.00': 34};
+ return values.map((text, index) => ({
+  id: `1:${index}`, page: 1, text, x: 300 - text.length * CHAR_WIDTH, y: 20 * (index + 1),
+  width: widths[text], size: 9, color: '#000000',
+ }));
+}
+
+test('a money column drawn by character count is written to one edge', () => {
+ const blocks = alignedColumn();
+ const moves = columnAlignment(blocks);
+ assert.equal(moves.length, 3, `only the off-column values move, got ${moves.length}`);
+ for (const move of moves) assert.ok(Math.abs(move.edge - 309) < 0.01, `every value joins the five-character edge, got ${move.edge}`);
+ assert.deepEqual(moves.map(move => move.block.text).sort(), ['1,475.00', '100.00', '7.00']);
+});
+
+test('a column that already shares one edge is left exactly as it is', () => {
+ const blocks = ['15.00', '10.00', '13.00', '90.00'].map((text, index) => ({
+  id: `1:${index}`, page: 1, text, x: 290, y: 20 * (index + 1), width: 20, size: 9, color: '#000000',
+ }));
+ assert.deepEqual(columnAlignment(blocks), []);
+});
+
+test('page furniture in another size is not treated as part of a column', () => {
+ const blocks = [...alignedColumn(),
+  {id: '1:page', page: 1, text: '3', x: 315, y: 780, width: 5, size: 6, color: '#ffffff'},
+  {id: '1:pages', page: 1, text: '24', x: 320, y: 780, width: 10, size: 6, color: '#ffffff'}];
+ const moves = columnAlignment(blocks);
+ assert.equal(moves.length, 3);
+ assert.ok(!moves.some(move => move.block.size === 6), 'the header numbers keep their place');
+});
+
+test('one number per page is a page number, not a column', () => {
+ const blocks = [];
+ for (let page = 1; page <= 8; page += 1) {
+  blocks.push({id: `${page}:0`, page, text: '1', x: 313, y: 780, width: 5.56, size: 8, color: '#000000'});
+ }
+ assert.deepEqual(columnAlignment(blocks), [], 'an edge needs several values on one page before it can claim one');
+});
+
+test('a column is written to the same edge on every page of the document', () => {
+ const first = alignedColumn();
+ const second = first.map(block => ({...block, id: `2:${block.id.split(':')[1]}`, page: 2}));
+ const moves = columnAlignment([...first, ...second]);
+ const edges = new Set(moves.map(move => move.edge.toFixed(4)));
+ assert.deepEqual([...edges], ['309.0000'], 'one edge for both pages');
+ assert.equal(moves.filter(move => move.page === 2).length, 3);
+});
+
+// The whole path, on a page a producer would really write: each value is drawn
+// where a fixed-width metric put it, and the export has to land every one of them
+// on the column's own edge.
+async function characterCountPage(values, {edge = 260, size = 9} = {}) {
+ const pdf = await L.PDFDocument.create();
+ const font = await pdf.embedFont(L.StandardFonts.Helvetica);
+ const page = pdf.addPage([300, 200]);
+ const widths = new Map();
+ values.forEach((text, index) => {
+  page.drawText(text, {x: edge - text.length * 2.2, y: 170 - index * 20, size, font});
+  widths.set(text, font.widthOfTextAtSize(text, size));
+ });
+ page.drawText(ALPHABET, {x: 20, y: 20, size, font});
+ return {bytes: await pdf.save(), values, edge, size, widths};
+}
+
+test('an export writes a character-count column onto one right edge', async () => {
+ const fixture = await characterCountPage(['15.00', '10.00', '13.00', '7.00', '100.00']);
+ const blocks = fixture.values.map((text, index) => ({
+  id: `1:${index}`, page: 1, text, x: fixture.edge - text.length * 2.2, y: viewY(170 - index * 20),
+  width: fixture.widths.get(text), height: fixture.size, size: fixture.size, fontName: 'Helvetica',
+  fontId: 'g_d0_f1', font: 'original', bold: false, italic: false, underline: false, spacing: 0,
+  wordSpacing: 0, lineheight: 1.2, align: 'left', scaleX: 1, textMode: 0, strokeWidth: 1,
+  color: '#000000', strokeColor: '#000000', ops: [index], canEdit: true,
+ }));
+ const moves = columnAlignment(blocks);
+ const edits = new Map(moves.map(move => [move.block.id, {...move.block, columnEdge: move.edge}]));
+ const ops = [...fixture.values.map((text, index) => op(index, text)), op(fixture.values.length, ALPHABET)];
+ const bytes = await exportNativePdf({
+  original: fixture.bytes, edits, PDFLib: L,
+  getPage: async () => ({vp: {transform: [1, 0, 0, -1, 0, 200]}, info: {ops}, blocks}),
+ });
+ const pdf = await L.PDFDocument.load(bytes.slice(), {updateMetadata: false});
+ const stream = pdf.context.lookup(pdf.getPage(0).node.get(name('Contents')));
+ const placements = matrices(latin1(L.decodePDFRawStream(stream).decode()));
+ assert.equal(moves.length, 2, 'the short and the long value are the ones off the column');
+ // The writer measures the replacement with the glyph map of the run it replaces,
+ // which is the same table the page's own text was drawn with.
+ const measured = text => [...text].reduce((total, char) => total + (WIDTHS[char] ?? 600) * fixture.size / 1000, 0);
+ for (const move of moves) {
+  const expected = move.edge - measured(move.block.text);
+  assert.ok(placements.some(place => Math.abs(place[4] - expected) < 0.01),
+   `${move.block.text} ends on ${move.edge}, expected x ${expected}`);
+ }
+ // The values already on the column keep the producer's own placement.
+ for (const text of ['15.00', '10.00', '13.00']) {
+  const x = fixture.edge - text.length * 2.2;
+  assert.ok(placements.some(place => Math.abs(place[4] - x) < 0.01), `${text} stays where it was`);
+ }
 });
